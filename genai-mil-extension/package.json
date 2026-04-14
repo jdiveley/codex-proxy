@@ -2,7 +2,7 @@
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
   "description": "Connect to GenAI.mil APIs from VS Code with interactive chat and file editing",
-  "version": "3.1.0",
+  "version": "6.0.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -10,9 +10,12 @@
   "activationEvents": [
     "onCommand:genai-mil.openChat",
     "onCommand:genai-mil.setApiKey",
+    "onCommand:genai-mil.deleteApiKey",
     "onCommand:genai-mil.selectEndpoint",
     "onCommand:genai-mil.selectModel",
-    "onCommand:genai-mil.setPemCert"
+    "onCommand:genai-mil.setAuthType",
+    "onCommand:genai-mil.setPemCert",
+    "onCommand:genai-mil.showSettings"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -26,6 +29,10 @@
         "title": "GenAI.mil: Set API Key"
       },
       {
+        "command": "genai-mil.deleteApiKey",
+        "title": "GenAI.mil: Delete API Key"
+      },
+      {
         "command": "genai-mil.selectEndpoint",
         "title": "GenAI.mil: Select Endpoint"
       },
@@ -34,27 +41,42 @@
         "title": "GenAI.mil: Select Model"
       },
       {
+        "command": "genai-mil.setAuthType",
+        "title": "GenAI.mil: Set Auth Type"
+      },
+      {
         "command": "genai-mil.setPemCert",
         "title": "GenAI.mil: Set PEM Certificate"
+      },
+      {
+        "command": "genai-mil.showSettings",
+        "title": "GenAI.mil: Show Current Settings"
       }
     ],
     "configuration": {
       "title": "GenAI.mil",
       "properties": {
-        "genai-mil.apiKey": {
-          "type": "string",
-          "default": "",
-          "description": "API Key for GenAI.mil"
-        },
         "genai-mil.endpoint": {
           "type": "string",
           "default": "https://api.genai.mil/v1/chat/completions",
-          "description": "API Endpoint URL"
+          "description": "API Endpoint URL (supports custom URLs)"
         },
         "genai-mil.model": {
           "type": "string",
           "default": "gemini-2.5-flash",
           "description": "Model to use for completions"
+        },
+        "genai-mil.authType": {
+          "type": "string",
+          "default": "bearer",
+          "enum": ["bearer", "api-key", "x-api-key", "basic"],
+          "enumDescriptions": [
+            "Authorization: Bearer YOUR_KEY",
+            "api-key: YOUR_KEY",
+            "x-api-key: YOUR_KEY",
+            "Authorization: Basic YOUR_KEY"
+          ],
+          "description": "Authentication header type for the API"
         },
         "genai-mil.pemPath": {
           "type": "string",

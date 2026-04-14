@@ -4,7 +4,6 @@ const fs = require('fs');
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION: Known endpoints and their available models
-// Add new endpoints and models here as needed
 // ═══════════════════════════════════════════════════════════════
 const KNOWN_ENDPOINTS = {
     "https://api.genai.mil/v1/chat/completions": {
@@ -20,19 +19,60 @@ const KNOWN_ENDPOINTS = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Get VS Code configuration
+// HELPER: Generate a secret storage key per endpoint
+// ═══════════════════════════════════════════════════════════════
+function getApiKeySecretName(endpoint) {
+    // Create a safe key name from the endpoint URL
+    // e.g., "https://api.genai.mil/v1/chat/completions" -> "genai-mil.apiKey.api.genai.mil"
+    try {
+        const url = new URL(endpoint);
+        return 'genai-mil.apiKey.' + url.hostname;
+    } catch (e) {
+        return 'genai-mil.apiKey.default';
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Get VS Code configuration (non-secret settings)
 // ═══════════════════════════════════════════════════════════════
 function getConfig() {
     const config = vscode.workspace.getConfiguration('genai-mil');
     return {
-        apiKey: config.get('apiKey') || '',
-        endpoint: config.get('endpoint') || '',
-        model: config.get('model') || '',
-        pemPath: config.get('pemPath') || '',
+        endpoint: (config.get('endpoint') || '').trim(),
+        model: (config.get('model') || '').trim(),
+        pemPath: (config.get('pemPath') || '').trim(),
+        authType: (config.get('authType') || 'bearer').trim(),
         update: function (key, value) {
             return config.update(key, value, true);
         }
     };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Build auth headers based on auth type
+// ═══════════════════════════════════════════════════════════════
+function getAuthHeaders(apiKey, authType) {
+    const headers = {
+        'Content-Type': 'application/json'
+    };
+
+    switch (authType) {
+        case 'api-key':
+            headers['api-key'] = apiKey;
+            break;
+        case 'x-api-key':
+            headers['x-api-key'] = apiKey;
+            break;
+        case 'basic':
+            headers['Authorization'] = 'Basic ' + apiKey;
+            break;
+        case 'bearer':
+        default:
+            headers['Authorization'] = 'Bearer ' + apiKey;
+            break;
+    }
+
+    return headers;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -45,7 +85,6 @@ async function writeFileToWorkspace(filename, content, openBeside) {
         const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
         const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
 
-        // Check if file exists
         let fileExists = false;
         try {
             await vscode.workspace.fs.stat(fileUri);
@@ -121,7 +160,6 @@ async function editFileInWorkspace(filename, content) {
         return true;
 
     } catch (e) {
-        // File does not exist, create it
         const encoder = new TextEncoder();
         await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
         const doc = await vscode.workspace.openTextDocument(fileUri);
@@ -134,7 +172,7 @@ async function editFileInWorkspace(filename, content) {
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Make HTTPS POST request with streaming
 // ═══════════════════════════════════════════════════════════════
-function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
+function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType) {
     let url;
     try {
         url = new URL(endpoint);
@@ -149,29 +187,26 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
         stream: true
     });
 
+    const headers = getAuthHeaders(apiKey, authType);
+    headers['Content-Length'] = Buffer.byteLength(payload);
+
     const options = {
         hostname: url.hostname,
         port: url.port || 443,
         path: url.pathname + (url.search || ''),
         method: 'POST',
-        headers: {
-            'Authorization': 'Bearer ' + apiKey,
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(payload)
-        }
+        headers: headers
     };
 
-    // Add PEM certificate if provided
     if (pemPath) {
         try {
             options.ca = fs.readFileSync(pemPath);
         } catch (e) {
-            // Continue without PEM if file cannot be read
+            // Continue without PEM
         }
     }
 
     const req = https.request(options, function (res) {
-        // Handle non-200 status codes
         if (res.statusCode < 200 || res.statusCode >= 300) {
             let errorBody = '';
             res.on('data', function (chunk) { errorBody += chunk.toString(); });
@@ -255,28 +290,15 @@ const SYSTEM_PROMPT = {
 function activate(context) {
     console.log('GenAI.mil extension is now active');
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set API Key
-    // ─────────────────────────────────────────────
-    const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
-        const apiKey = await vscode.window.showInputBox({
-            prompt: 'Enter your GenAI.mil API Key',
-            password: true,
-            placeHolder: 'YOUR_API_KEY',
-            ignoreFocusOut: true
-        });
-        if (apiKey) {
-            const config = getConfig();
-            await config.update('apiKey', apiKey);
-            vscode.window.showInformationMessage('API Key saved successfully');
-        }
-    });
+    const secretStorage = context.secrets;
 
     // ─────────────────────────────────────────────
-    // COMMAND: Select Endpoint (includes custom)
+    // COMMAND: Set API Key (per endpoint, stored securely)
     // ─────────────────────────────────────────────
-    const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
-        // Build quick pick items from known endpoints
+    const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
+        const config = getConfig();
+
+        // Ask which endpoint this key is for
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
             items.push({
@@ -285,7 +307,129 @@ function activate(context) {
                 value: url
             });
         }
-        // Add custom endpoint option
+        // Add current endpoint if custom
+        if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
+            items.unshift({
+                label: 'Current Endpoint',
+                description: config.endpoint,
+                value: config.endpoint
+            });
+        }
+        items.push({
+            label: '✏️ Enter Custom Endpoint URL',
+            description: 'Set key for a different endpoint',
+            value: '__custom__'
+        });
+
+        const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: 'Which endpoint is this API key for?'
+        });
+
+        if (!selected) {
+            return;
+        }
+
+        let targetEndpoint = selected.value;
+
+        if (targetEndpoint === '__custom__') {
+            targetEndpoint = await vscode.window.showInputBox({
+                prompt: 'Enter the endpoint URL this API key is for',
+                placeHolder: 'https://your-api.example.com/v1/chat/completions',
+                ignoreFocusOut: true,
+                validateInput: function (value) {
+                    try {
+                        new URL(value);
+                        return null;
+                    } catch (e) {
+                        return 'Please enter a valid URL';
+                    }
+                }
+            });
+            if (!targetEndpoint) {
+                return;
+            }
+        }
+
+        const apiKey = await vscode.window.showInputBox({
+            prompt: 'Enter the API Key for ' + targetEndpoint,
+            password: true,
+            placeHolder: 'YOUR_API_KEY',
+            ignoreFocusOut: true
+        });
+
+        if (apiKey) {
+            const trimmedKey = apiKey.trim();
+            const secretName = getApiKeySecretName(targetEndpoint);
+            await secretStorage.store(secretName, trimmedKey);
+
+            let hostname = '';
+            try {
+                hostname = new URL(targetEndpoint).hostname;
+            } catch (e) {
+                hostname = targetEndpoint;
+            }
+
+            vscode.window.showInformationMessage(
+                'API Key saved securely for ' + hostname +
+                ' (' + trimmedKey.length + ' chars). Stored in OS credential manager.'
+            );
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Delete API Key
+    // ─────────────────────────────────────────────
+    const deleteApiKeyCommand = vscode.commands.registerCommand('genai-mil.deleteApiKey', async function () {
+        const config = getConfig();
+
+        const items = [];
+        for (const url in KNOWN_ENDPOINTS) {
+            items.push({
+                label: KNOWN_ENDPOINTS[url].label,
+                description: url,
+                value: url
+            });
+        }
+        if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
+            items.unshift({
+                label: 'Current Endpoint',
+                description: config.endpoint,
+                value: config.endpoint
+            });
+        }
+
+        const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: 'Delete API key for which endpoint?'
+        });
+
+        if (!selected) {
+            return;
+        }
+
+        const confirm = await vscode.window.showWarningMessage(
+            'Delete API key for ' + selected.description + '?',
+            'Yes', 'No'
+        );
+
+        if (confirm === 'Yes') {
+            const secretName = getApiKeySecretName(selected.value);
+            await secretStorage.delete(secretName);
+            vscode.window.showInformationMessage('API Key deleted for ' + selected.description);
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Select Endpoint (includes custom)
+    // ─────────────────────────────────────────────
+    const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
+        const items = [];
+        for (const url in KNOWN_ENDPOINTS) {
+            items.push({
+                label: KNOWN_ENDPOINTS[url].label,
+                description: url,
+                value: url
+            });
+        }
         items.push({
             label: '✏️ Enter Custom Endpoint',
             description: 'Type in a custom API URL',
@@ -302,7 +446,6 @@ function activate(context) {
 
         let endpointUrl = selected.value;
 
-        // Handle custom endpoint
         if (endpointUrl === '__custom__') {
             endpointUrl = await vscode.window.showInputBox({
                 prompt: 'Enter the full API endpoint URL',
@@ -326,23 +469,34 @@ function activate(context) {
         const config = getConfig();
         await config.update('endpoint', endpointUrl);
 
-        // Auto-set model if endpoint is known
         const known = KNOWN_ENDPOINTS[endpointUrl];
         if (known && known.defaultModel) {
             await config.update('model', known.defaultModel);
-            vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl + ' | Model: ' + known.defaultModel);
+            vscode.window.showInformationMessage('Endpoint: ' + endpointUrl + ' | Model: ' + known.defaultModel);
         } else {
-            // Prompt for model name if custom endpoint
             const modelName = await vscode.window.showInputBox({
                 prompt: 'Enter the model name for this endpoint',
                 placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
                 ignoreFocusOut: true
             });
             if (modelName) {
-                await config.update('model', modelName);
-                vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl + ' | Model: ' + modelName);
+                await config.update('model', modelName.trim());
+                vscode.window.showInformationMessage('Endpoint: ' + endpointUrl + ' | Model: ' + modelName.trim());
             } else {
-                vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl);
+                vscode.window.showInformationMessage('Endpoint: ' + endpointUrl);
+            }
+        }
+
+        // Check if API key exists for this endpoint
+        const secretName = getApiKeySecretName(endpointUrl);
+        const existingKey = await secretStorage.get(secretName);
+        if (!existingKey) {
+            const setKey = await vscode.window.showWarningMessage(
+                'No API key found for this endpoint. Set one now?',
+                'Yes', 'Later'
+            );
+            if (setKey === 'Yes') {
+                await vscode.commands.executeCommand('genai-mil.setApiKey');
             }
         }
     });
@@ -352,25 +506,22 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
         const config = getConfig();
-        const endpoint = config.endpoint;
-        const known = KNOWN_ENDPOINTS[endpoint];
+        const known = KNOWN_ENDPOINTS[config.endpoint];
 
         if (known && known.models && known.models.length > 0) {
-            // Show known models for this endpoint
             const items = known.models.map(function (m) {
                 return {
                     label: m,
                     description: m === known.defaultModel ? '(default)' : ''
                 };
             });
-            // Add custom model option
             items.push({
                 label: '✏️ Enter Custom Model',
                 description: 'Type in a custom model name'
             });
 
             const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Select a model for ' + endpoint
+                placeHolder: 'Select a model for ' + config.endpoint
             });
 
             if (!selected) {
@@ -384,25 +535,44 @@ function activate(context) {
                     ignoreFocusOut: true
                 });
                 if (customModel) {
-                    await config.update('model', customModel);
-                    vscode.window.showInformationMessage('Model set to: ' + customModel);
+                    await config.update('model', customModel.trim());
+                    vscode.window.showInformationMessage('Model set to: ' + customModel.trim());
                 }
             } else {
                 await config.update('model', selected.label);
                 vscode.window.showInformationMessage('Model set to: ' + selected.label);
             }
         } else {
-            // Custom endpoint - just ask for model name
             const customModel = await vscode.window.showInputBox({
-                prompt: 'Enter the model name for ' + endpoint,
+                prompt: 'Enter the model name for ' + config.endpoint,
                 placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
                 value: config.model,
                 ignoreFocusOut: true
             });
             if (customModel) {
-                await config.update('model', customModel);
-                vscode.window.showInformationMessage('Model set to: ' + customModel);
+                await config.update('model', customModel.trim());
+                vscode.window.showInformationMessage('Model set to: ' + customModel.trim());
             }
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Set Auth Type
+    // ─────────────────────────────────────────────
+    const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
+        const selected = await vscode.window.showQuickPick([
+            { label: 'Bearer Token', description: 'Authorization: Bearer YOUR_KEY', value: 'bearer' },
+            { label: 'API Key Header', description: 'api-key: YOUR_KEY', value: 'api-key' },
+            { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY', value: 'x-api-key' },
+            { label: 'Basic Auth', description: 'Authorization: Basic YOUR_KEY', value: 'basic' }
+        ], {
+            placeHolder: 'Select authentication type'
+        });
+
+        if (selected) {
+            const config = getConfig();
+            await config.update('authType', selected.value);
+            vscode.window.showInformationMessage('Auth type set to: ' + selected.label);
         }
     });
 
@@ -442,7 +612,6 @@ function activate(context) {
 
         if (fileUri && fileUri[0]) {
             const pemPath = fileUri[0].fsPath;
-            // Validate the PEM file exists and is readable
             try {
                 fs.accessSync(pemPath, fs.constants.R_OK);
                 await config.update('pemPath', pemPath);
@@ -451,6 +620,33 @@ function activate(context) {
                 vscode.window.showErrorMessage('Cannot read PEM file: ' + pemPath);
             }
         }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Show Current Settings
+    // ─────────────────────────────────────────────
+    const showSettingsCommand = vscode.commands.registerCommand('genai-mil.showSettings', async function () {
+        const config = getConfig();
+        const secretName = getApiKeySecretName(config.endpoint);
+        const apiKey = await secretStorage.get(secretName);
+
+        let hostname = '';
+        try {
+            hostname = new URL(config.endpoint).hostname;
+        } catch (e) {
+            hostname = config.endpoint;
+        }
+
+        const info = [
+            'Endpoint: ' + (config.endpoint || 'Not set'),
+            'Model: ' + (config.model || 'Not set'),
+            'Auth Type: ' + (config.authType || 'bearer'),
+            'API Key (' + hostname + '): ' + (apiKey ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)' : 'Not set'),
+            'API Key Storage: OS Credential Manager (encrypted)',
+            'PEM Cert: ' + (config.pemPath || 'Not set')
+        ].join('\n');
+
+        vscode.window.showInformationMessage(info, { modal: true });
     });
 
     // ─────────────────────────────────────────────
@@ -469,34 +665,53 @@ function activate(context) {
 
         let chatHistory = [];
 
-        panel.webview.html = getWebviewContent(chatHistory, false);
+        // Function to refresh the webview
+        function refreshWebview(loading) {
+            const config = getConfig();
+            panel.webview.html = getWebviewContent(chatHistory, loading, config);
+        }
+
+        refreshWebview(false);
 
         panel.webview.onDidReceiveMessage(async function (message) {
             const config = getConfig();
+            const secretName = getApiKeySecretName(config.endpoint);
+            const apiKey = await secretStorage.get(secretName);
 
-            // ─────────────────────────────────────
             // CLEAR CHAT
-            // ─────────────────────────────────────
             if (message.command === 'clearChat') {
                 chatHistory = [];
-                panel.webview.html = getWebviewContent(chatHistory, false);
+                refreshWebview(false);
                 return;
             }
 
-            // ─────────────────────────────────────
+            // CHANGE MODEL (from chat window button)
+            if (message.command === 'changeModel') {
+                await vscode.commands.executeCommand('genai-mil.selectModel');
+                // Refresh the webview to show updated model
+                refreshWebview(false);
+                return;
+            }
+
+            // CHANGE ENDPOINT (from chat window button)
+            if (message.command === 'changeEndpoint') {
+                await vscode.commands.executeCommand('genai-mil.selectEndpoint');
+                refreshWebview(false);
+                return;
+            }
+
             // SEND MESSAGE
-            // ─────────────────────────────────────
             if (message.command === 'send') {
-                if (!config.apiKey) {
-                    vscode.window.showErrorMessage('API Key not set. Run "GenAI.mil: Set API Key" first.');
+                if (!apiKey) {
+                    vscode.window.showErrorMessage(
+                        'No API key found for this endpoint. Run "GenAI.mil: Set API Key" first.'
+                    );
                     return;
                 }
-
                 if (!config.endpoint) {
                     vscode.window.showErrorMessage('Endpoint not set. Run "GenAI.mil: Select Endpoint" first.');
                     return;
                 }
-
                 if (!config.model) {
                     vscode.window.showErrorMessage('Model not set. Run "GenAI.mil: Select Model" first.');
                     return;
@@ -504,7 +719,7 @@ function activate(context) {
 
                 const userMessage = message.text;
                 chatHistory.push({ role: 'user', content: userMessage });
-                panel.webview.html = getWebviewContent(chatHistory, true);
+                refreshWebview(true);
 
                 const apiMessages = [SYSTEM_PROMPT].concat(chatHistory);
 
@@ -512,7 +727,7 @@ function activate(context) {
 
                 streamRequest(
                     config.endpoint,
-                    config.apiKey,
+                    apiKey,
                     config.model,
                     apiMessages,
                     function (content) {
@@ -521,34 +736,29 @@ function activate(context) {
                     },
                     function () {
                         chatHistory.push({ role: 'assistant', content: aiMessage });
-                        panel.webview.html = getWebviewContent(chatHistory, false);
+                        refreshWebview(false);
                     },
                     function (error) {
                         chatHistory.push({ role: 'assistant', content: 'Error: ' + error.message });
-                        panel.webview.html = getWebviewContent(chatHistory, false);
+                        refreshWebview(false);
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
-                    config.pemPath
+                    config.pemPath,
+                    config.authType
                 );
             }
 
-            // ─────────────────────────────────────
             // CREATE FILE
-            // ─────────────────────────────────────
             if (message.command === 'createFile') {
                 await writeFileToWorkspace(message.filename, message.content, true);
             }
 
-            // ─────────────────────────────────────
             // EDIT FILE
-            // ─────────────────────────────────────
             if (message.command === 'editFile') {
                 await editFileInWorkspace(message.filename, message.content);
             }
 
-            // ─────────────────────────────────────
             // INSERT AT CURSOR
-            // ─────────────────────────────────────
             if (message.command === 'insertAtCursor') {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
@@ -561,9 +771,7 @@ function activate(context) {
                 }
             }
 
-            // ─────────────────────────────────────
             // SAVE CHAT
-            // ─────────────────────────────────────
             if (message.command === 'saveChat') {
                 let chatContent = '';
                 for (let j = 0; j < chatHistory.length; j++) {
@@ -596,26 +804,28 @@ function activate(context) {
     // Register all commands
     context.subscriptions.push(
         setApiKeyCommand,
+        deleteApiKeyCommand,
         selectEndpointCommand,
         selectModelCommand,
+        setAuthTypeCommand,
         setPemCertCommand,
+        showSettingsCommand,
         openChatCommand
     );
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBVIEW HTML
+// WEBVIEW HTML (uses VS Code CSS variables for theme matching)
 // ═══════════════════════════════════════════════════════════════
-function getWebviewContent(chatHistory, loading) {
+function getWebviewContent(chatHistory, loading, config) {
     let chatHtml = '';
 
     for (let i = 0; i < chatHistory.length; i++) {
         const msg = chatHistory[i];
         const isUser = msg.role === 'user';
         const who = isUser ? 'You' : 'GenAI';
-        const bgColor = isUser ? '#e3f2fd' : '#f5f5f5';
-        const borderColor = isUser ? '#007acc' : '#4caf50';
         const icon = isUser ? '👤' : '🤖';
+        const msgClass = isUser ? 'message user-message' : 'message ai-message';
 
         let content = escapeHtml(msg.content);
 
@@ -660,7 +870,7 @@ function getWebviewContent(chatHistory, loading) {
         // Newlines to <br>
         content = content.replace(/\n/g, '<br>');
 
-        chatHtml += '<div class="message" style="background:' + bgColor + ';border-left:4px solid ' + borderColor + ';">' +
+        chatHtml += '<div class="' + msgClass + '">' +
             '<b>' + icon + ' ' + who + ':</b><br>' + content +
             '</div>';
     }
@@ -669,44 +879,216 @@ function getWebviewContent(chatHistory, loading) {
         chatHtml += '<div class="message loading"><em>⏳ GenAI is thinking...</em></div>';
     }
 
-    // Get current config for status bar
-    const config = getConfig();
-    const statusInfo = 'Endpoint: ' + (config.endpoint || 'Not set') + ' | Model: ' + (config.model || 'Not set');
+    const statusEndpoint = config.endpoint || 'Not set';
+    const statusModel = config.model || 'Not set';
+    const statusAuth = config.authType || 'bearer';
 
     return '<!DOCTYPE html>' +
         '<html lang="en">' +
         '<head>' +
         '<style>' +
-        'body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }' +
-        '.container { display: flex; flex-direction: column; height: 100vh; padding: 12px; box-sizing: border-box; }' +
-        'h2 { margin: 0 0 4px 0; color: #007acc; font-size: 18px; }' +
-        '.status-bar { font-size: 11px; color: #666; margin-bottom: 8px; padding: 4px 8px; background: #f0f0f0; border-radius: 4px; }' +
-        '.toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }' +
-        '.toolbar button { padding: 4px 10px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #f0f0f0; }' +
-        '.toolbar button:hover { background: #e0e0e0; }' +
-        '#chat { flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 6px; padding: 10px; background: #fafafa; margin-bottom: 8px; }' +
-        '.message { margin-bottom: 10px; padding: 10px; border-radius: 6px; word-wrap: break-word; }' +
-        '.loading { background: #fff3e0 !important; border-left: 4px solid #ff9800 !important; }' +
-        '.code-block { background: #1e1e1e; color: #d4d4d4; border-radius: 6px; margin: 8px 0; overflow: hidden; }' +
-        '.code-header { background: #333; color: #fff; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; font-size: 12px; flex-wrap: wrap; gap: 6px; }' +
+        // Use VS Code CSS variables for theme matching
+        'body {' +
+        '    font-family: var(--vscode-font-family, "Segoe UI", Arial, sans-serif);' +
+        '    font-size: var(--vscode-font-size, 13px);' +
+        '    margin: 0;' +
+        '    padding: 0;' +
+        '    background: var(--vscode-editor-background, #1e1e1e);' +
+        '    color: var(--vscode-editor-foreground, #cccccc);' +
+        '}' +
+        '.container {' +
+        '    display: flex;' +
+        '    flex-direction: column;' +
+        '    height: 100vh;' +
+        '    padding: 12px;' +
+        '    box-sizing: border-box;' +
+        '}' +
+        'h2 {' +
+        '    margin: 0 0 4px 0;' +
+        '    color: var(--vscode-textLink-foreground, #3794ff);' +
+        '    font-size: 16px;' +
+        '}' +
+        '.status-bar {' +
+        '    font-size: 11px;' +
+        '    color: var(--vscode-descriptionForeground, #999);' +
+        '    margin-bottom: 8px;' +
+        '    padding: 4px 8px;' +
+        '    background: var(--vscode-sideBar-background, #252526);' +
+        '    border: 1px solid var(--vscode-widget-border, #454545);' +
+        '    border-radius: 4px;' +
+        '    display: flex;' +
+        '    align-items: center;' +
+        '    justify-content: space-between;' +
+        '    flex-wrap: wrap;' +
+        '    gap: 6px;' +
+        '}' +
+        '.status-info { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }' +
+        '.status-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
+        '.status-btn {' +
+        '    padding: 2px 8px;' +
+        '    font-size: 11px;' +
+        '    cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545);' +
+        '    border-radius: 3px;' +
+        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
+        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
+        '}' +
+        '.status-btn:hover {' +
+        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
+        '}' +
+        '.toolbar {' +
+        '    display: flex;' +
+        '    gap: 8px;' +
+        '    margin-bottom: 8px;' +
+        '    flex-wrap: wrap;' +
+        '}' +
+        '.toolbar button {' +
+        '    padding: 4px 10px;' +
+        '    font-size: 12px;' +
+        '    cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545);' +
+        '    border-radius: 4px;' +
+        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
+        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
+        '}' +
+        '.toolbar button:hover {' +
+        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
+        '}' +
+        '#chat {' +
+        '    flex: 1;' +
+        '    overflow-y: auto;' +
+        '    border: 1px solid var(--vscode-widget-border, #454545);' +
+        '    border-radius: 6px;' +
+        '    padding: 10px;' +
+        '    background: var(--vscode-editor-background, #1e1e1e);' +
+        '    margin-bottom: 8px;' +
+        '}' +
+        '.message {' +
+        '    margin-bottom: 10px;' +
+        '    padding: 10px;' +
+        '    border-radius: 6px;' +
+        '    word-wrap: break-word;' +
+        '}' +
+        '.user-message {' +
+        '    background: var(--vscode-textBlockQuote-background, #2a2d2e);' +
+        '    border-left: 4px solid var(--vscode-textLink-foreground, #3794ff);' +
+        '}' +
+        '.ai-message {' +
+        '    background: var(--vscode-editor-inactiveSelectionBackground, #3a3d41);' +
+        '    border-left: 4px solid var(--vscode-terminal-ansiGreen, #4caf50);' +
+        '}' +
+        '.loading {' +
+        '    background: var(--vscode-inputValidation-warningBackground, #352a05) !important;' +
+        '    border-left: 4px solid var(--vscode-inputValidation-warningBorder, #ff9800) !important;' +
+        '}' +
+        '.code-block {' +
+        '    background: var(--vscode-textCodeBlock-background, #0a0a0a);' +
+        '    color: var(--vscode-editor-foreground, #d4d4d4);' +
+        '    border-radius: 6px;' +
+        '    margin: 8px 0;' +
+        '    overflow: hidden;' +
+        '    border: 1px solid var(--vscode-widget-border, #454545);' +
+        '}' +
+        '.code-header {' +
+        '    background: var(--vscode-editorGroupHeader-tabsBackground, #252526);' +
+        '    color: var(--vscode-foreground, #cccccc);' +
+        '    padding: 6px 10px;' +
+        '    display: flex;' +
+        '    align-items: center;' +
+        '    justify-content: space-between;' +
+        '    font-size: 12px;' +
+        '    flex-wrap: wrap;' +
+        '    gap: 6px;' +
+        '}' +
         '.code-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
-        '.code-btn { padding: 3px 8px; font-size: 11px; cursor: pointer; border: 1px solid #555; border-radius: 3px; background: #444; color: #fff; }' +
-        '.code-btn:hover { background: #666; }' +
-        'pre { margin: 0; padding: 12px; overflow-x: auto; font-size: 13px; }' +
-        'code { font-family: "Consolas", "Courier New", monospace; }' +
-        '.inline-code { background: #e8e8e8; padding: 2px 5px; border-radius: 3px; font-size: 13px; }' +
-        '#form { display: flex; gap: 8px; }' +
-        '#input { flex: 1; padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; outline: none; }' +
-        '#input:focus { border-color: #007acc; }' +
-        '#form button { padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 6px; background: #007acc; color: #fff; }' +
-        '#form button:hover { background: #005a9e; }' +
-        '.empty-state { color: #999; text-align: center; padding: 40px; font-size: 14px; }' +
+        '.code-btn {' +
+        '    padding: 3px 8px;' +
+        '    font-size: 11px;' +
+        '    cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545);' +
+        '    border-radius: 3px;' +
+        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
+        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
+        '}' +
+        '.code-btn:hover {' +
+        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
+        '}' +
+        'pre {' +
+        '    margin: 0;' +
+        '    padding: 12px;' +
+        '    overflow-x: auto;' +
+        '    font-size: 13px;' +
+        '}' +
+        'code {' +
+        '    font-family: var(--vscode-editor-font-family, "Consolas", "Courier New", monospace);' +
+        '    font-size: var(--vscode-editor-font-size, 13px);' +
+        '}' +
+        '.inline-code {' +
+        '    background: var(--vscode-textCodeBlock-background, #0a0a0a);' +
+        '    padding: 2px 5px;' +
+        '    border-radius: 3px;' +
+        '    font-size: 13px;' +
+        '}' +
+        '#form {' +
+        '    display: flex;' +
+        '    gap: 8px;' +
+        '}' +
+        '#input {' +
+        '    flex: 1;' +
+        '    padding: 10px;' +
+        '    font-size: 14px;' +
+        '    border: 1px solid var(--vscode-input-border, #454545);' +
+        '    border-radius: 6px;' +
+        '    outline: none;' +
+        '    background: var(--vscode-input-background, #3c3c3c);' +
+        '    color: var(--vscode-input-foreground, #cccccc);' +
+        '}' +
+        '#input:focus {' +
+        '    border-color: var(--vscode-focusBorder, #007fd4);' +
+        '}' +
+        '#input::placeholder {' +
+        '    color: var(--vscode-input-placeholderForeground, #999);' +
+        '}' +
+        '#form button {' +
+        '    padding: 10px 20px;' +
+        '    font-size: 14px;' +
+        '    cursor: pointer;' +
+        '    border: none;' +
+        '    border-radius: 6px;' +
+        '    background: var(--vscode-button-background, #0e639c);' +
+        '    color: var(--vscode-button-foreground, #ffffff);' +
+        '}' +
+        '#form button:hover {' +
+        '    background: var(--vscode-button-hoverBackground, #1177bb);' +
+        '}' +
+        '.empty-state {' +
+        '    color: var(--vscode-descriptionForeground, #999);' +
+        '    text-align: center;' +
+        '    padding: 40px;' +
+        '    font-size: 14px;' +
+        '}' +
+        // Scrollbar styling to match VS Code
+        '#chat::-webkit-scrollbar { width: 10px; }' +
+        '#chat::-webkit-scrollbar-track { background: var(--vscode-scrollbarSlider-background, transparent); }' +
+        '#chat::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, #79797966); border-radius: 5px; }' +
+        '#chat::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, #646464b3); }' +
         '</style>' +
         '</head>' +
         '<body>' +
         '<div class="container">' +
         '<h2>🤖 GenAI.mil Chat</h2>' +
-        '<div class="status-bar">' + escapeHtml(statusInfo) + '</div>' +
+        '<div class="status-bar">' +
+        '<div class="status-info">' +
+        '<span>🌐 ' + escapeHtml(statusEndpoint) + '</span>' +
+        '<span>🤖 ' + escapeHtml(statusModel) + '</span>' +
+        '<span>🔐 ' + escapeHtml(statusAuth) + '</span>' +
+        '<span>🔒 Key: Encrypted</span>' +
+        '</div>' +
+        '<div class="status-actions">' +
+        '<button class="status-btn" id="changeModelBtn">Change Model</button>' +
+        '<button class="status-btn" id="changeEndpointBtn">Change Endpoint</button>' +
+        '</div>' +
+        '</div>' +
         '<div class="toolbar">' +
         '<button id="saveChatBtn">💾 Save Chat</button>' +
         '<button id="clearChatBtn">🗑️ Clear Chat</button>' +
@@ -734,6 +1116,12 @@ function getWebviewContent(chatHistory, loading) {
         '});' +
         'document.getElementById("clearChatBtn").addEventListener("click", function() {' +
         '    vscode.postMessage({ command: "clearChat" });' +
+        '});' +
+        'document.getElementById("changeModelBtn").addEventListener("click", function() {' +
+        '    vscode.postMessage({ command: "changeModel" });' +
+        '});' +
+        'document.getElementById("changeEndpointBtn").addEventListener("click", function() {' +
+        '    vscode.postMessage({ command: "changeEndpoint" });' +
         '});' +
         'document.getElementById("chat").addEventListener("click", function(e) {' +
         '    var btn = e.target.closest(".code-btn");' +
