@@ -2,9 +2,146 @@ const vscode = require('vscode');
 const https = require('https');
 const fs = require('fs');
 
-// Helper: Make HTTPS POST request with streaming support and optional PEM certificate
+// ═══════════════════════════════════════════════════════════════
+// CONFIGURATION: Known endpoints and their available models
+// Add new endpoints and models here as needed
+// ═══════════════════════════════════════════════════════════════
+const KNOWN_ENDPOINTS = {
+    "https://api.genai.mil/v1/chat/completions": {
+        label: "Chat Completions API",
+        defaultModel: "gemini-2.5-flash",
+        models: ["gemini-2.5-flash", "gemini-2.5-pro"]
+    },
+    "https://genai.mil/api/v1": {
+        label: "GenAI API v1",
+        defaultModel: "default-model-for-v1",
+        models: ["default-model-for-v1"]
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Get VS Code configuration
+// ═══════════════════════════════════════════════════════════════
+function getConfig() {
+    const config = vscode.workspace.getConfiguration('genai-mil');
+    return {
+        apiKey: config.get('apiKey') || '',
+        endpoint: config.get('endpoint') || '',
+        model: config.get('model') || '',
+        pemPath: config.get('pemPath') || '',
+        update: function (key, value) {
+            return config.update(key, value, true);
+        }
+    };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Write file to workspace or prompt save dialog
+// ═══════════════════════════════════════════════════════════════
+async function writeFileToWorkspace(filename, content, openBeside) {
+    const encoder = new TextEncoder();
+
+    if (vscode.workspace.workspaceFolders) {
+        const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
+        const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
+
+        // Check if file exists
+        let fileExists = false;
+        try {
+            await vscode.workspace.fs.stat(fileUri);
+            fileExists = true;
+        } catch (e) {
+            fileExists = false;
+        }
+
+        if (fileExists) {
+            const overwrite = await vscode.window.showWarningMessage(
+                'File "' + filename + '" already exists. Overwrite?',
+                'Yes', 'No'
+            );
+            if (overwrite !== 'Yes') {
+                return false;
+            }
+        }
+
+        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
+        vscode.window.showInformationMessage('File created: ' + filename);
+
+        if (openBeside) {
+            const doc = await vscode.workspace.openTextDocument(fileUri);
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        }
+
+        return true;
+
+    } else {
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(filename),
+            saveLabel: 'Save File'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, encoder.encode(content));
+            vscode.window.showInformationMessage('File saved: ' + uri.fsPath);
+            if (openBeside) {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+            }
+            return true;
+        }
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Edit existing file or create if not found
+// ═══════════════════════════════════════════════════════════════
+async function editFileInWorkspace(filename, content) {
+    if (!vscode.workspace.workspaceFolders) {
+        vscode.window.showErrorMessage('Open a workspace folder first to edit files.');
+        return false;
+    }
+
+    const wsUri = vscode.workspace.workspaceFolders[0].uri;
+    const fileUri = vscode.Uri.joinPath(wsUri, filename);
+
+    try {
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+
+        const fullRange = new vscode.Range(
+            doc.positionAt(0),
+            doc.positionAt(doc.getText().length)
+        );
+
+        await editor.edit(function (editBuilder) {
+            editBuilder.replace(fullRange, content);
+        });
+
+        vscode.window.showInformationMessage('File updated: ' + filename);
+        return true;
+
+    } catch (e) {
+        // File does not exist, create it
+        const encoder = new TextEncoder();
+        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        vscode.window.showInformationMessage('File created: ' + filename);
+        return true;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Make HTTPS POST request with streaming
+// ═══════════════════════════════════════════════════════════════
 function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
-    const url = new URL(endpoint);
+    let url;
+    try {
+        url = new URL(endpoint);
+    } catch (e) {
+        onError(new Error('Invalid endpoint URL: ' + endpoint));
+        return;
+    }
 
     const payload = JSON.stringify({
         model: model,
@@ -14,8 +151,8 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
 
     const options = {
         hostname: url.hostname,
-        port: 443,
-        path: url.pathname,
+        port: url.port || 443,
+        path: url.pathname + (url.search || ''),
         method: 'POST',
         headers: {
             'Authorization': 'Bearer ' + apiKey,
@@ -29,11 +166,21 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
         try {
             options.ca = fs.readFileSync(pemPath);
         } catch (e) {
-            // If PEM file cannot be read, continue without it
+            // Continue without PEM if file cannot be read
         }
     }
 
     const req = https.request(options, function (res) {
+        // Handle non-200 status codes
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+            let errorBody = '';
+            res.on('data', function (chunk) { errorBody += chunk.toString(); });
+            res.on('end', function () {
+                onError(new Error('HTTP ' + res.statusCode + ': ' + (errorBody || res.statusMessage)));
+            });
+            return;
+        }
+
         let buffer = '';
 
         res.on('data', function (chunk) {
@@ -43,7 +190,7 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
             buffer = lines.pop() || '';
 
             for (let i = 0; i < lines.length; i++) {
-                const line = lines[i];
+                const line = lines[i].trim();
                 if (line.startsWith('data: ')) {
                     const data = line.slice(6).trim();
 
@@ -79,14 +226,38 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
         onError(err);
     });
 
+    req.setTimeout(60000, function () {
+        req.destroy(new Error('Request timed out after 60 seconds'));
+    });
+
     req.write(payload);
     req.end();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SYSTEM PROMPT
+// ═══════════════════════════════════════════════════════════════
+const SYSTEM_PROMPT = {
+    role: 'system',
+    content: 'You are a helpful coding assistant inside VS Code. ' +
+        'When the user asks you to create or edit a file, respond with the full file content wrapped in a code block. ' +
+        'Always include the filename on the first line of the code block like this:\n' +
+        '```language:path/to/filename.ext\n' +
+        'code here\n' +
+        '```\n' +
+        'If editing an existing file, include the complete updated file content. ' +
+        'Always provide complete, working code.'
+};
+
+// ═══════════════════════════════════════════════════════════════
+// ACTIVATION
+// ═══════════════════════════════════════════════════════════════
 function activate(context) {
     console.log('GenAI.mil extension is now active');
 
-    // Set API Key Command
+    // ─────────────────────────────────────────────
+    // COMMAND: Set API Key
+    // ─────────────────────────────────────────────
     const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
         const apiKey = await vscode.window.showInputBox({
             prompt: 'Enter your GenAI.mil API Key',
@@ -95,35 +266,169 @@ function activate(context) {
             ignoreFocusOut: true
         });
         if (apiKey) {
-            await vscode.workspace.getConfiguration('genai-mil').update('apiKey', apiKey, true);
+            const config = getConfig();
+            await config.update('apiKey', apiKey);
             vscode.window.showInformationMessage('API Key saved successfully');
         }
     });
 
-    // Select Endpoint Command
+    // ─────────────────────────────────────────────
+    // COMMAND: Select Endpoint (includes custom)
+    // ─────────────────────────────────────────────
     const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
-        const endpoint = await vscode.window.showQuickPick([
-            {
-                label: 'Chat Completions API',
-                description: 'https://api.genai.mil/v1/chat/completions',
-                value: 'https://api.genai.mil/v1/chat/completions'
-            },
-            {
-                label: 'GenAI API v1',
-                description: 'https://genai.mil/api/v1',
-                value: 'https://genai.mil/api/v1'
-            }
-        ], {
+        // Build quick pick items from known endpoints
+        const items = [];
+        for (const url in KNOWN_ENDPOINTS) {
+            items.push({
+                label: KNOWN_ENDPOINTS[url].label,
+                description: url,
+                value: url
+            });
+        }
+        // Add custom endpoint option
+        items.push({
+            label: '✏️ Enter Custom Endpoint',
+            description: 'Type in a custom API URL',
+            value: '__custom__'
+        });
+
+        const selected = await vscode.window.showQuickPick(items, {
             placeHolder: 'Select API Endpoint'
         });
-        if (endpoint) {
-            await vscode.workspace.getConfiguration('genai-mil').update('endpoint', endpoint.value, true);
-            vscode.window.showInformationMessage('Endpoint set to: ' + endpoint.label);
+
+        if (!selected) {
+            return;
+        }
+
+        let endpointUrl = selected.value;
+
+        // Handle custom endpoint
+        if (endpointUrl === '__custom__') {
+            endpointUrl = await vscode.window.showInputBox({
+                prompt: 'Enter the full API endpoint URL',
+                placeHolder: 'https://your-api.example.com/v1/chat/completions',
+                ignoreFocusOut: true,
+                validateInput: function (value) {
+                    try {
+                        new URL(value);
+                        return null;
+                    } catch (e) {
+                        return 'Please enter a valid URL';
+                    }
+                }
+            });
+
+            if (!endpointUrl) {
+                return;
+            }
+        }
+
+        const config = getConfig();
+        await config.update('endpoint', endpointUrl);
+
+        // Auto-set model if endpoint is known
+        const known = KNOWN_ENDPOINTS[endpointUrl];
+        if (known && known.defaultModel) {
+            await config.update('model', known.defaultModel);
+            vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl + ' | Model: ' + known.defaultModel);
+        } else {
+            // Prompt for model name if custom endpoint
+            const modelName = await vscode.window.showInputBox({
+                prompt: 'Enter the model name for this endpoint',
+                placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                ignoreFocusOut: true
+            });
+            if (modelName) {
+                await config.update('model', modelName);
+                vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl + ' | Model: ' + modelName);
+            } else {
+                vscode.window.showInformationMessage('Endpoint set to: ' + endpointUrl);
+            }
         }
     });
 
-    // Set PEM Certificate Command
+    // ─────────────────────────────────────────────
+    // COMMAND: Select Model
+    // ─────────────────────────────────────────────
+    const selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
+        const config = getConfig();
+        const endpoint = config.endpoint;
+        const known = KNOWN_ENDPOINTS[endpoint];
+
+        if (known && known.models && known.models.length > 0) {
+            // Show known models for this endpoint
+            const items = known.models.map(function (m) {
+                return {
+                    label: m,
+                    description: m === known.defaultModel ? '(default)' : ''
+                };
+            });
+            // Add custom model option
+            items.push({
+                label: '✏️ Enter Custom Model',
+                description: 'Type in a custom model name'
+            });
+
+            const selected = await vscode.window.showQuickPick(items, {
+                placeHolder: 'Select a model for ' + endpoint
+            });
+
+            if (!selected) {
+                return;
+            }
+
+            if (selected.label === '✏️ Enter Custom Model') {
+                const customModel = await vscode.window.showInputBox({
+                    prompt: 'Enter the model name',
+                    placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                    ignoreFocusOut: true
+                });
+                if (customModel) {
+                    await config.update('model', customModel);
+                    vscode.window.showInformationMessage('Model set to: ' + customModel);
+                }
+            } else {
+                await config.update('model', selected.label);
+                vscode.window.showInformationMessage('Model set to: ' + selected.label);
+            }
+        } else {
+            // Custom endpoint - just ask for model name
+            const customModel = await vscode.window.showInputBox({
+                prompt: 'Enter the model name for ' + endpoint,
+                placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                value: config.model,
+                ignoreFocusOut: true
+            });
+            if (customModel) {
+                await config.update('model', customModel);
+                vscode.window.showInformationMessage('Model set to: ' + customModel);
+            }
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Set PEM Certificate
+    // ─────────────────────────────────────────────
     const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
+        const action = await vscode.window.showQuickPick([
+            { label: '📂 Browse for PEM file', value: 'browse' },
+            { label: '🗑️ Clear PEM certificate', value: 'clear' }
+        ], {
+            placeHolder: 'Set or clear PEM certificate'
+        });
+
+        if (!action) {
+            return;
+        }
+
+        const config = getConfig();
+
+        if (action.value === 'clear') {
+            await config.update('pemPath', '');
+            vscode.window.showInformationMessage('PEM Certificate cleared');
+            return;
+        }
+
         const fileUri = await vscode.window.showOpenDialog({
             canSelectFiles: true,
             canSelectFolders: false,
@@ -137,12 +442,20 @@ function activate(context) {
 
         if (fileUri && fileUri[0]) {
             const pemPath = fileUri[0].fsPath;
-            await vscode.workspace.getConfiguration('genai-mil').update('pemPath', pemPath, true);
-            vscode.window.showInformationMessage('PEM Certificate set: ' + pemPath);
+            // Validate the PEM file exists and is readable
+            try {
+                fs.accessSync(pemPath, fs.constants.R_OK);
+                await config.update('pemPath', pemPath);
+                vscode.window.showInformationMessage('PEM Certificate set: ' + pemPath);
+            } catch (e) {
+                vscode.window.showErrorMessage('Cannot read PEM file: ' + pemPath);
+            }
         }
     });
 
-    // Open Chat Command
+    // ─────────────────────────────────────────────
+    // COMMAND: Open Chat
+    // ─────────────────────────────────────────────
     const openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
         const panel = vscode.window.createWebviewPanel(
             'genaiMilChat',
@@ -159,23 +472,33 @@ function activate(context) {
         panel.webview.html = getWebviewContent(chatHistory, false);
 
         panel.webview.onDidReceiveMessage(async function (message) {
-            const config = vscode.workspace.getConfiguration('genai-mil');
-            const apiKey = config.get('apiKey');
-            const endpoint = config.get('endpoint');
-            const model = config.get('model');
-            const pemPath = config.get('pemPath');
+            const config = getConfig();
 
-            // Clear Chat
+            // ─────────────────────────────────────
+            // CLEAR CHAT
+            // ─────────────────────────────────────
             if (message.command === 'clearChat') {
                 chatHistory = [];
                 panel.webview.html = getWebviewContent(chatHistory, false);
                 return;
             }
 
-            // Send Message
+            // ─────────────────────────────────────
+            // SEND MESSAGE
+            // ─────────────────────────────────────
             if (message.command === 'send') {
-                if (!apiKey) {
+                if (!config.apiKey) {
                     vscode.window.showErrorMessage('API Key not set. Run "GenAI.mil: Set API Key" first.');
+                    return;
+                }
+
+                if (!config.endpoint) {
+                    vscode.window.showErrorMessage('Endpoint not set. Run "GenAI.mil: Select Endpoint" first.');
+                    return;
+                }
+
+                if (!config.model) {
+                    vscode.window.showErrorMessage('Model not set. Run "GenAI.mil: Select Model" first.');
                     return;
                 }
 
@@ -183,27 +506,14 @@ function activate(context) {
                 chatHistory.push({ role: 'user', content: userMessage });
                 panel.webview.html = getWebviewContent(chatHistory, true);
 
-                const apiMessages = [
-                    {
-                        role: 'system',
-                        content: 'You are a helpful coding assistant inside VS Code. ' +
-                            'When the user asks you to create or edit a file, respond with the full file content wrapped in a code block. ' +
-                            'Always include the filename on the first line of the code block like this:\n' +
-                            '```language:path/to/filename.ext\n' +
-                            'code here\n' +
-                            '```\n' +
-                            'If editing an existing file, include the complete updated file content. ' +
-                            'Always provide complete, working code.'
-                    },
-                    ...chatHistory
-                ];
+                const apiMessages = [SYSTEM_PROMPT].concat(chatHistory);
 
                 let aiMessage = '';
 
                 streamRequest(
-                    endpoint,
-                    apiKey,
-                    model,
+                    config.endpoint,
+                    config.apiKey,
+                    config.model,
                     apiMessages,
                     function (content) {
                         aiMessage += content;
@@ -218,96 +528,27 @@ function activate(context) {
                         panel.webview.html = getWebviewContent(chatHistory, false);
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
-                    pemPath
+                    config.pemPath
                 );
             }
 
-            // Create File
+            // ─────────────────────────────────────
+            // CREATE FILE
+            // ─────────────────────────────────────
             if (message.command === 'createFile') {
-                const filename = message.filename;
-                const content = message.content;
-
-                if (vscode.workspace.workspaceFolders) {
-                    const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
-                    const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
-
-                    let fileExists = false;
-                    try {
-                        await vscode.workspace.fs.stat(fileUri);
-                        fileExists = true;
-                    } catch (e) {
-                        fileExists = false;
-                    }
-
-                    if (fileExists) {
-                        const overwrite = await vscode.window.showWarningMessage(
-                            'File "' + filename + '" already exists. Overwrite?',
-                            'Yes', 'No'
-                        );
-                        if (overwrite !== 'Yes') {
-                            return;
-                        }
-                    }
-
-                    const encoder = new TextEncoder();
-                    await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
-                    vscode.window.showInformationMessage('File created: ' + filename);
-
-                    const doc = await vscode.workspace.openTextDocument(fileUri);
-                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-
-                } else {
-                    const uri = await vscode.window.showSaveDialog({
-                        defaultUri: vscode.Uri.file(filename),
-                        saveLabel: 'Save File'
-                    });
-                    if (uri) {
-                        const enc = new TextEncoder();
-                        await vscode.workspace.fs.writeFile(uri, enc.encode(content));
-                        vscode.window.showInformationMessage('File saved: ' + uri.fsPath);
-                        const d = await vscode.workspace.openTextDocument(uri);
-                        await vscode.window.showTextDocument(d, vscode.ViewColumn.Beside);
-                    }
-                }
+                await writeFileToWorkspace(message.filename, message.content, true);
             }
 
-            // Edit File
+            // ─────────────────────────────────────
+            // EDIT FILE
+            // ─────────────────────────────────────
             if (message.command === 'editFile') {
-                const editFilename = message.filename;
-                const editContent = message.content;
-
-                if (vscode.workspace.workspaceFolders) {
-                    const wsUri = vscode.workspace.workspaceFolders[0].uri;
-                    const editFileUri = vscode.Uri.joinPath(wsUri, editFilename);
-
-                    try {
-                        const editDoc = await vscode.workspace.openTextDocument(editFileUri);
-                        const editor = await vscode.window.showTextDocument(editDoc, vscode.ViewColumn.Beside);
-
-                        const fullRange = new vscode.Range(
-                            editDoc.positionAt(0),
-                            editDoc.positionAt(editDoc.getText().length)
-                        );
-
-                        await editor.edit(function (editBuilder) {
-                            editBuilder.replace(fullRange, editContent);
-                        });
-
-                        vscode.window.showInformationMessage('File updated: ' + editFilename);
-
-                    } catch (e) {
-                        const enc2 = new TextEncoder();
-                        await vscode.workspace.fs.writeFile(editFileUri, enc2.encode(editContent));
-                        const newDoc = await vscode.workspace.openTextDocument(editFileUri);
-                        await vscode.window.showTextDocument(newDoc, vscode.ViewColumn.Beside);
-                        vscode.window.showInformationMessage('File created: ' + editFilename);
-                    }
-                } else {
-                    vscode.window.showErrorMessage('Open a workspace folder first to edit files.');
-                }
+                await editFileInWorkspace(message.filename, message.content);
             }
 
-            // Insert at Cursor
+            // ─────────────────────────────────────
+            // INSERT AT CURSOR
+            // ─────────────────────────────────────
             if (message.command === 'insertAtCursor') {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
@@ -320,7 +561,9 @@ function activate(context) {
                 }
             }
 
-            // Save Chat
+            // ─────────────────────────────────────
+            // SAVE CHAT
+            // ─────────────────────────────────────
             if (message.command === 'saveChat') {
                 let chatContent = '';
                 for (let j = 0; j < chatHistory.length; j++) {
@@ -342,18 +585,27 @@ function activate(context) {
                 });
 
                 if (saveUri) {
-                    const enc3 = new TextEncoder();
-                    await vscode.workspace.fs.writeFile(saveUri, enc3.encode(chatContent));
+                    const encoder = new TextEncoder();
+                    await vscode.workspace.fs.writeFile(saveUri, encoder.encode(chatContent));
                     vscode.window.showInformationMessage('Chat saved to ' + saveUri.fsPath);
                 }
             }
         });
     });
 
-    context.subscriptions.push(setApiKeyCommand, selectEndpointCommand, setPemCertCommand, openChatCommand);
+    // Register all commands
+    context.subscriptions.push(
+        setApiKeyCommand,
+        selectEndpointCommand,
+        selectModelCommand,
+        setPemCertCommand,
+        openChatCommand
+    );
 }
 
-// Webview HTML content
+// ═══════════════════════════════════════════════════════════════
+// WEBVIEW HTML
+// ═══════════════════════════════════════════════════════════════
 function getWebviewContent(chatHistory, loading) {
     let chatHtml = '';
 
@@ -417,14 +669,19 @@ function getWebviewContent(chatHistory, loading) {
         chatHtml += '<div class="message loading"><em>⏳ GenAI is thinking...</em></div>';
     }
 
+    // Get current config for status bar
+    const config = getConfig();
+    const statusInfo = 'Endpoint: ' + (config.endpoint || 'Not set') + ' | Model: ' + (config.model || 'Not set');
+
     return '<!DOCTYPE html>' +
         '<html lang="en">' +
         '<head>' +
         '<style>' +
         'body { font-family: "Segoe UI", Arial, sans-serif; margin: 0; padding: 0; background: #fff; color: #333; }' +
         '.container { display: flex; flex-direction: column; height: 100vh; padding: 12px; box-sizing: border-box; }' +
-        'h2 { margin: 0 0 8px 0; color: #007acc; font-size: 18px; }' +
-        '.toolbar { display: flex; gap: 8px; margin-bottom: 8px; }' +
+        'h2 { margin: 0 0 4px 0; color: #007acc; font-size: 18px; }' +
+        '.status-bar { font-size: 11px; color: #666; margin-bottom: 8px; padding: 4px 8px; background: #f0f0f0; border-radius: 4px; }' +
+        '.toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }' +
         '.toolbar button { padding: 4px 10px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #f0f0f0; }' +
         '.toolbar button:hover { background: #e0e0e0; }' +
         '#chat { flex: 1; overflow-y: auto; border: 1px solid #ddd; border-radius: 6px; padding: 10px; background: #fafafa; margin-bottom: 8px; }' +
@@ -449,6 +706,7 @@ function getWebviewContent(chatHistory, loading) {
         '<body>' +
         '<div class="container">' +
         '<h2>🤖 GenAI.mil Chat</h2>' +
+        '<div class="status-bar">' + escapeHtml(statusInfo) + '</div>' +
         '<div class="toolbar">' +
         '<button id="saveChatBtn">💾 Save Chat</button>' +
         '<button id="clearChatBtn">🗑️ Clear Chat</button>' +
@@ -510,6 +768,9 @@ function getWebviewContent(chatHistory, loading) {
         '</html>';
 }
 
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Escape HTML
+// ═══════════════════════════════════════════════════════════════
 function escapeHtml(text) {
     return text
         .replace(/&/g, '&')
@@ -518,6 +779,9 @@ function escapeHtml(text) {
         .replace(/"/g, '"');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// DEACTIVATION
+// ═══════════════════════════════════════════════════════════════
 function deactivate() {}
 
 module.exports = {
