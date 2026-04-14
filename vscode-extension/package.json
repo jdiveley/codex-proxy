@@ -1,0 +1,125 @@
+{
+  "name": "codex-proxy",
+  "displayName": "Codex Proxy",
+  "description": "Proxy between OpenAI Codex CLI and LLM backends (OpenAI, Anthropic, Gemini / Ask Sage)",
+  "version": "0.1.0",
+  "publisher": "codex-proxy",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/example/codex-proxy"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["codex", "openai", "anthropic", "claude", "gemini", "proxy", "llm"],
+  "icon": "resources/icon.png",
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "build:watch": "node esbuild.mjs --watch",
+    "package": "vsce package --no-dependencies",
+    "lint": "tsc --noEmit"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codex-proxy.start",
+        "title": "Start Proxy",
+        "category": "Codex Proxy",
+        "icon": "$(play)"
+      },
+      {
+        "command": "codex-proxy.stop",
+        "title": "Stop Proxy",
+        "category": "Codex Proxy",
+        "icon": "$(stop)"
+      },
+      {
+        "command": "codex-proxy.restart",
+        "title": "Restart Proxy",
+        "category": "Codex Proxy",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "codex-proxy.showOutput",
+        "title": "Show Output",
+        "category": "Codex Proxy"
+      },
+      {
+        "command": "codex-proxy.copyConfig",
+        "title": "Copy Codex Environment Variables",
+        "category": "Codex Proxy"
+      }
+    ],
+    "configuration": {
+      "title": "Codex Proxy",
+      "properties": {
+        "codex-proxy.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the proxy when VS Code opens."
+        },
+        "codex-proxy.port": {
+          "type": "number",
+          "default": 8080,
+          "description": "Port the proxy listens on. Configure Codex with OPENAI_BASE_URL=http://localhost:<port>."
+        },
+        "codex-proxy.backendBaseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com",
+          "description": "Base URL of the LLM backend. For Ask Sage use https://sage.ask-sage.ai. The proxy derives provider-specific paths automatically."
+        },
+        "codex-proxy.apiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Authentication token sent as Bearer to the backend. For Ask Sage: your personal API token. For OpenAI: your API key.",
+          "secret": true
+        },
+        "codex-proxy.openaiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override for the OpenAI Chat Completions endpoint (leave blank to derive from backendBaseUrl)."
+        },
+        "codex-proxy.anthropicBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override for the Anthropic Messages endpoint (leave blank to derive from backendBaseUrl)."
+        },
+        "codex-proxy.geminiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override for the Gemini endpoint (leave blank to derive from backendBaseUrl)."
+        },
+        "codex-proxy.defaultMaxTokens": {
+          "type": "number",
+          "default": 8192,
+          "description": "Max tokens to request when the Codex request does not specify max_output_tokens."
+        },
+        "codex-proxy.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log full request/response bodies to the Output channel."
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        { "command": "codex-proxy.start" },
+        { "command": "codex-proxy.stop" },
+        { "command": "codex-proxy.restart" },
+        { "command": "codex-proxy.showOutput" },
+        { "command": "codex-proxy.copyConfig" }
+      ]
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.5",
+    "@vscode/vsce": "^2.26.1"
+  }
+}

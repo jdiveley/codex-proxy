@@ -1,0 +1,9 @@
+**/.git
+**/.gitignore
+**/node_modules/**
+src/**
+out/**
+esbuild.mjs
+tsconfig.json
+.vscodeignore
+# Keep: dist/, resources/, package.json
