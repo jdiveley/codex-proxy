@@ -1,12 +1,13 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat and file editing",
-  "version": "6.0.0",
+  "description": "Connect to GenAI.mil and Ask Sage APIs from VS Code with interactive chat and file editing",
+  "version": "8.0.0",
   "engines": {
     "vscode": "^1.60.0"
   },
   "categories": ["Other"],
+  "icon": "icon.png",
   "activationEvents": [
     "onCommand:genai-mil.openChat",
     "onCommand:genai-mil.setApiKey",
@@ -15,14 +16,19 @@
     "onCommand:genai-mil.selectModel",
     "onCommand:genai-mil.setAuthType",
     "onCommand:genai-mil.setPemCert",
-    "onCommand:genai-mil.showSettings"
+    "onCommand:genai-mil.showSettings",
+    "onCommand:genai-mil.fetchModels"
   ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
       {
         "command": "genai-mil.openChat",
-        "title": "GenAI.mil: Open Chat"
+        "title": "GenAI.mil: Open Chat",
+        "icon": {
+          "light": "resources/chat-light.svg",
+          "dark": "resources/chat-dark.svg"
+        }
       },
       {
         "command": "genai-mil.setApiKey",
@@ -51,8 +57,27 @@
       {
         "command": "genai-mil.showSettings",
         "title": "GenAI.mil: Show Current Settings"
+      },
+      {
+        "command": "genai-mil.fetchModels",
+        "title": "GenAI.mil: Fetch Available Models"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "genai-mil.openChat",
+          "group": "navigation",
+          "when": "true"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "genai-mil.openChat",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "GenAI.mil",
       "properties": {
@@ -82,6 +107,20 @@
           "type": "string",
           "default": "",
           "description": "Path to PEM certificate file for SSL/TLS connections"
+        },
+        "genai-mil.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Temperature for model responses (0 = deterministic, 2 = creative)"
+        },
+        "genai-mil.maxTokens": {
+          "type": "number",
+          "default": 4096,
+          "minimum": 1,
+          "maximum": 128000,
+          "description": "Maximum number of tokens in the response"
         }
       }
     }

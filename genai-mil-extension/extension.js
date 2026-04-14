@@ -4,17 +4,47 @@ const fs = require('fs');
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION: Known endpoints and their available models
+// Based on Ask Sage API documentation:
+// https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html
 // ═══════════════════════════════════════════════════════════════
 const KNOWN_ENDPOINTS = {
     "https://api.genai.mil/v1/chat/completions": {
-        label: "Chat Completions API",
+        label: "GenAI.mil Chat Completions",
+        baseUrl: "https://api.genai.mil",
         defaultModel: "gemini-2.5-flash",
-        models: ["gemini-2.5-flash", "gemini-2.5-pro"]
+        models: [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "o4-mini",
+            "claude-sonnet-4",
+            "claude-3.5-sonnet",
+            "claude-3.5-haiku"
+        ],
+        modelsEndpoint: "/v1/models"
     },
-    "https://genai.mil/api/v1": {
-        label: "GenAI API v1",
-        defaultModel: "default-model-for-v1",
-        models: ["default-model-for-v1"]
+    "https://api.asksage.ai/v1/chat/completions": {
+        label: "Ask Sage Chat Completions",
+        baseUrl: "https://api.asksage.ai",
+        defaultModel: "gemini-2.5-flash",
+        models: [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4.1-nano",
+            "o4-mini",
+            "claude-sonnet-4",
+            "claude-3.5-sonnet",
+            "claude-3.5-haiku"
+        ],
+        modelsEndpoint: "/v1/models"
     }
 };
 
@@ -22,8 +52,6 @@ const KNOWN_ENDPOINTS = {
 // HELPER: Generate a secret storage key per endpoint
 // ═══════════════════════════════════════════════════════════════
 function getApiKeySecretName(endpoint) {
-    // Create a safe key name from the endpoint URL
-    // e.g., "https://api.genai.mil/v1/chat/completions" -> "genai-mil.apiKey.api.genai.mil"
     try {
         const url = new URL(endpoint);
         return 'genai-mil.apiKey.' + url.hostname;
@@ -33,7 +61,19 @@ function getApiKeySecretName(endpoint) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Get VS Code configuration (non-secret settings)
+// HELPER: Get base URL from endpoint
+// ═══════════════════════════════════════════════════════════════
+function getBaseUrl(endpoint) {
+    try {
+        const url = new URL(endpoint);
+        return url.protocol + '//' + url.hostname + (url.port ? ':' + url.port : '');
+    } catch (e) {
+        return endpoint;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Get VS Code configuration
 // ═══════════════════════════════════════════════════════════════
 function getConfig() {
     const config = vscode.workspace.getConfiguration('genai-mil');
@@ -42,6 +82,8 @@ function getConfig() {
         model: (config.get('model') || '').trim(),
         pemPath: (config.get('pemPath') || '').trim(),
         authType: (config.get('authType') || 'bearer').trim(),
+        temperature: config.get('temperature') || 0.7,
+        maxTokens: config.get('maxTokens') || 4096,
         update: function (key, value) {
             return config.update(key, value, true);
         }
@@ -73,6 +115,62 @@ function getAuthHeaders(apiKey, authType) {
     }
 
     return headers;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Make HTTPS GET request (for fetching models)
+// ═══════════════════════════════════════════════════════════════
+function httpsGet(endpoint, apiKey, authType, pemPath) {
+    return new Promise(function (resolve, reject) {
+        let url;
+        try {
+            url = new URL(endpoint);
+        } catch (e) {
+            reject(new Error('Invalid URL: ' + endpoint));
+            return;
+        }
+
+        const headers = getAuthHeaders(apiKey, authType);
+        delete headers['Content-Type'];
+
+        const options = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: url.pathname + (url.search || ''),
+            method: 'GET',
+            headers: headers
+        };
+
+        if (pemPath) {
+            try {
+                options.ca = fs.readFileSync(pemPath);
+            } catch (e) {
+                // Continue without PEM
+            }
+        }
+
+        const req = https.request(options, function (res) {
+            let body = '';
+            res.on('data', function (chunk) { body += chunk.toString(); });
+            res.on('end', function () {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    reject(new Error('HTTP ' + res.statusCode + ': ' + body));
+                } else {
+                    try {
+                        resolve(JSON.parse(body));
+                    } catch (e) {
+                        reject(new Error('Invalid JSON response'));
+                    }
+                }
+            });
+        });
+
+        req.on('error', function (err) { reject(err); });
+        req.setTimeout(30000, function () {
+            req.destroy(new Error('Request timed out'));
+        });
+        req.end();
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -172,7 +270,7 @@ async function editFileInWorkspace(filename, content) {
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Make HTTPS POST request with streaming
 // ═══════════════════════════════════════════════════════════════
-function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType) {
+function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
     let url;
     try {
         url = new URL(endpoint);
@@ -184,7 +282,9 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
     const payload = JSON.stringify({
         model: model,
         messages: messages,
-        stream: true
+        stream: true,
+        temperature: temperature,
+        max_tokens: maxTokens
     });
 
     const headers = getAuthHeaders(apiKey, authType);
@@ -211,7 +311,18 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
             let errorBody = '';
             res.on('data', function (chunk) { errorBody += chunk.toString(); });
             res.on('end', function () {
-                onError(new Error('HTTP ' + res.statusCode + ': ' + (errorBody || res.statusMessage)));
+                let errorMsg = 'HTTP ' + res.statusCode + ': ';
+                try {
+                    const parsed = JSON.parse(errorBody);
+                    if (parsed.error && parsed.error.message) {
+                        errorMsg += parsed.error.message;
+                    } else {
+                        errorMsg += errorBody;
+                    }
+                } catch (e) {
+                    errorMsg += errorBody || res.statusMessage;
+                }
+                onError(new Error(errorMsg));
             });
             return;
         }
@@ -261,8 +372,8 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
         onError(err);
     });
 
-    req.setTimeout(60000, function () {
-        req.destroy(new Error('Request timed out after 60 seconds'));
+    req.setTimeout(120000, function () {
+        req.destroy(new Error('Request timed out after 120 seconds'));
     });
 
     req.write(payload);
@@ -292,13 +403,15 @@ function activate(context) {
 
     const secretStorage = context.secrets;
 
+    // Track the active chat panel to prevent duplicates
+    let activeChatPanel = null;
+
     // ─────────────────────────────────────────────
-    // COMMAND: Set API Key (per endpoint, stored securely)
+    // COMMAND: Set API Key (per endpoint)
     // ─────────────────────────────────────────────
     const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
         const config = getConfig();
 
-        // Ask which endpoint this key is for
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
             items.push({
@@ -307,7 +420,6 @@ function activate(context) {
                 value: url
             });
         }
-        // Add current endpoint if custom
         if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
             items.unshift({
                 label: 'Current Endpoint',
@@ -419,7 +531,7 @@ function activate(context) {
     });
 
     // ─────────────────────────────────────────────
-    // COMMAND: Select Endpoint (includes custom)
+    // COMMAND: Select Endpoint
     // ─────────────────────────────────────────────
     const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
         const items = [];
@@ -476,7 +588,7 @@ function activate(context) {
         } else {
             const modelName = await vscode.window.showInputBox({
                 prompt: 'Enter the model name for this endpoint',
-                placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
                 ignoreFocusOut: true
             });
             if (modelName) {
@@ -487,7 +599,6 @@ function activate(context) {
             }
         }
 
-        // Check if API key exists for this endpoint
         const secretName = getApiKeySecretName(endpointUrl);
         const existingKey = await secretStorage.get(secretName);
         if (!existingKey) {
@@ -516,6 +627,10 @@ function activate(context) {
                 };
             });
             items.push({
+                label: '🔄 Fetch Models from API',
+                description: 'Query the API for available models'
+            });
+            items.push({
                 label: '✏️ Enter Custom Model',
                 description: 'Type in a custom model name'
             });
@@ -528,10 +643,15 @@ function activate(context) {
                 return;
             }
 
+            if (selected.label === '🔄 Fetch Models from API') {
+                await vscode.commands.executeCommand('genai-mil.fetchModels');
+                return;
+            }
+
             if (selected.label === '✏️ Enter Custom Model') {
                 const customModel = await vscode.window.showInputBox({
                     prompt: 'Enter the model name',
-                    placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                    placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
                     ignoreFocusOut: true
                 });
                 if (customModel) {
@@ -545,7 +665,7 @@ function activate(context) {
         } else {
             const customModel = await vscode.window.showInputBox({
                 prompt: 'Enter the model name for ' + config.endpoint,
-                placeHolder: 'e.g., gpt-4, gemini-2.5-flash',
+                placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
                 value: config.model,
                 ignoreFocusOut: true
             });
@@ -557,11 +677,68 @@ function activate(context) {
     });
 
     // ─────────────────────────────────────────────
+    // COMMAND: Fetch Available Models from API
+    // ─────────────────────────────────────────────
+    const fetchModelsCommand = vscode.commands.registerCommand('genai-mil.fetchModels', async function () {
+        const config = getConfig();
+        const secretName = getApiKeySecretName(config.endpoint);
+        const apiKey = await secretStorage.get(secretName);
+
+        if (!apiKey) {
+            vscode.window.showErrorMessage('No API key found. Set one first with "GenAI.mil: Set API Key".');
+            return;
+        }
+
+        const baseUrl = getBaseUrl(config.endpoint);
+        const modelsUrl = baseUrl + '/v1/models';
+
+        try {
+            vscode.window.showInformationMessage('Fetching models from ' + modelsUrl + '...');
+
+            const response = await httpsGet(modelsUrl, apiKey, config.authType, config.pemPath);
+
+            let models = [];
+            if (response && response.data && Array.isArray(response.data)) {
+                models = response.data.map(function (m) {
+                    return {
+                        label: m.id || m.name || m,
+                        description: m.owned_by ? 'by ' + m.owned_by : ''
+                    };
+                });
+            } else if (Array.isArray(response)) {
+                models = response.map(function (m) {
+                    return {
+                        label: typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m)),
+                        description: ''
+                    };
+                });
+            }
+
+            if (models.length === 0) {
+                vscode.window.showWarningMessage('No models returned from the API.');
+                return;
+            }
+
+            const selected = await vscode.window.showQuickPick(models, {
+                placeHolder: 'Select a model (' + models.length + ' available)'
+            });
+
+            if (selected) {
+                await config.update('model', selected.label);
+                vscode.window.showInformationMessage('Model set to: ' + selected.label);
+            }
+
+        } catch (error) {
+            vscode.window.showErrorMessage('Failed to fetch models: ' + error.message);
+        }
+    });
+
+    // ─────────────────────────────────────────────
     // COMMAND: Set Auth Type
     // ─────────────────────────────────────────────
     const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
         const selected = await vscode.window.showQuickPick([
-            { label: 'Bearer Token', description: 'Authorization: Bearer YOUR_KEY', value: 'bearer' },
+            { label: 'Bearer Token', description: 'Authorization: Bearer YOUR_KEY (Ask Sage default)', value: 'bearer' },
             { label: 'API Key Header', description: 'api-key: YOUR_KEY', value: 'api-key' },
             { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY', value: 'x-api-key' },
             { label: 'Basic Auth', description: 'Authorization: Basic YOUR_KEY', value: 'basic' }
@@ -641,6 +818,8 @@ function activate(context) {
             'Endpoint: ' + (config.endpoint || 'Not set'),
             'Model: ' + (config.model || 'Not set'),
             'Auth Type: ' + (config.authType || 'bearer'),
+            'Temperature: ' + config.temperature,
+            'Max Tokens: ' + config.maxTokens,
             'API Key (' + hostname + '): ' + (apiKey ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)' : 'Not set'),
             'API Key Storage: OS Credential Manager (encrypted)',
             'PEM Cert: ' + (config.pemPath || 'Not set')
@@ -653,6 +832,12 @@ function activate(context) {
     // COMMAND: Open Chat
     // ─────────────────────────────────────────────
     const openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
+        // If chat panel already exists, just reveal it
+        if (activeChatPanel) {
+            activeChatPanel.reveal(vscode.ViewColumn.One);
+            return;
+        }
+
         const panel = vscode.window.createWebviewPanel(
             'genaiMilChat',
             'GenAI.mil Chat',
@@ -663,15 +848,21 @@ function activate(context) {
             }
         );
 
+        activeChatPanel = panel;
+
         let chatHistory = [];
 
-        // Function to refresh the webview
         function refreshWebview(loading) {
             const config = getConfig();
             panel.webview.html = getWebviewContent(chatHistory, loading, config);
         }
 
         refreshWebview(false);
+
+        // Clean up when panel is closed
+        panel.onDidDispose(function () {
+            activeChatPanel = null;
+        });
 
         panel.webview.onDidReceiveMessage(async function (message) {
             const config = getConfig();
@@ -685,17 +876,23 @@ function activate(context) {
                 return;
             }
 
-            // CHANGE MODEL (from chat window button)
+            // CHANGE MODEL
             if (message.command === 'changeModel') {
                 await vscode.commands.executeCommand('genai-mil.selectModel');
-                // Refresh the webview to show updated model
                 refreshWebview(false);
                 return;
             }
 
-            // CHANGE ENDPOINT (from chat window button)
+            // CHANGE ENDPOINT
             if (message.command === 'changeEndpoint') {
                 await vscode.commands.executeCommand('genai-mil.selectEndpoint');
+                refreshWebview(false);
+                return;
+            }
+
+            // FETCH MODELS
+            if (message.command === 'fetchModels') {
+                await vscode.commands.executeCommand('genai-mil.fetchModels');
                 refreshWebview(false);
                 return;
             }
@@ -744,7 +941,9 @@ function activate(context) {
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
                     config.pemPath,
-                    config.authType
+                    config.authType,
+                    config.temperature,
+                    config.maxTokens
                 );
             }
 
@@ -801,12 +1000,23 @@ function activate(context) {
         });
     });
 
+    // ─────────────────────────────────────────────
+    // STATUS BAR BUTTON
+    // ─────────────────────────────────────────────
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.text = '$(comment-discussion) GenAI Chat';
+    statusBarItem.tooltip = 'Open GenAI.mil Chat';
+    statusBarItem.command = 'genai-mil.openChat';
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
+
     // Register all commands
     context.subscriptions.push(
         setApiKeyCommand,
         deleteApiKeyCommand,
         selectEndpointCommand,
         selectModelCommand,
+        fetchModelsCommand,
         setAuthTypeCommand,
         setPemCertCommand,
         showSettingsCommand,
@@ -815,7 +1025,7 @@ function activate(context) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBVIEW HTML (uses VS Code CSS variables for theme matching)
+// WEBVIEW HTML
 // ═══════════════════════════════════════════════════════════════
 function getWebviewContent(chatHistory, loading, config) {
     let chatHtml = '';
@@ -829,7 +1039,7 @@ function getWebviewContent(chatHistory, loading, config) {
 
         let content = escapeHtml(msg.content);
 
-        // Parse code blocks with filename: ```language:filename
+        // Parse code blocks with filename
         content = content.replace(
             /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
             function (match, lang, filename, code) {
@@ -867,7 +1077,7 @@ function getWebviewContent(chatHistory, loading, config) {
         // Parse inline code
         content = content.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
 
-        // Newlines to <br>
+        // Newlines
         content = content.replace(/\n/g, '<br>');
 
         chatHtml += '<div class="' + msgClass + '">' +
@@ -887,88 +1097,45 @@ function getWebviewContent(chatHistory, loading, config) {
         '<html lang="en">' +
         '<head>' +
         '<style>' +
-        // Use VS Code CSS variables for theme matching
         'body {' +
         '    font-family: var(--vscode-font-family, "Segoe UI", Arial, sans-serif);' +
         '    font-size: var(--vscode-font-size, 13px);' +
-        '    margin: 0;' +
-        '    padding: 0;' +
+        '    margin: 0; padding: 0;' +
         '    background: var(--vscode-editor-background, #1e1e1e);' +
         '    color: var(--vscode-editor-foreground, #cccccc);' +
         '}' +
-        '.container {' +
-        '    display: flex;' +
-        '    flex-direction: column;' +
-        '    height: 100vh;' +
-        '    padding: 12px;' +
-        '    box-sizing: border-box;' +
-        '}' +
-        'h2 {' +
-        '    margin: 0 0 4px 0;' +
-        '    color: var(--vscode-textLink-foreground, #3794ff);' +
-        '    font-size: 16px;' +
-        '}' +
+        '.container { display: flex; flex-direction: column; height: 100vh; padding: 12px; box-sizing: border-box; }' +
+        'h2 { margin: 0 0 4px 0; color: var(--vscode-textLink-foreground, #3794ff); font-size: 16px; }' +
         '.status-bar {' +
-        '    font-size: 11px;' +
-        '    color: var(--vscode-descriptionForeground, #999);' +
-        '    margin-bottom: 8px;' +
-        '    padding: 4px 8px;' +
+        '    font-size: 11px; color: var(--vscode-descriptionForeground, #999);' +
+        '    margin-bottom: 8px; padding: 6px 8px;' +
         '    background: var(--vscode-sideBar-background, #252526);' +
-        '    border: 1px solid var(--vscode-widget-border, #454545);' +
-        '    border-radius: 4px;' +
-        '    display: flex;' +
-        '    align-items: center;' +
-        '    justify-content: space-between;' +
-        '    flex-wrap: wrap;' +
-        '    gap: 6px;' +
+        '    border: 1px solid var(--vscode-widget-border, #454545); border-radius: 4px;' +
+        '    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;' +
         '}' +
         '.status-info { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }' +
         '.status-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
         '.status-btn {' +
-        '    padding: 2px 8px;' +
-        '    font-size: 11px;' +
-        '    cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545);' +
-        '    border-radius: 3px;' +
+        '    padding: 2px 8px; font-size: 11px; cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 3px;' +
         '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
         '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
         '}' +
-        '.status-btn:hover {' +
-        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
-        '}' +
-        '.toolbar {' +
-        '    display: flex;' +
-        '    gap: 8px;' +
-        '    margin-bottom: 8px;' +
-        '    flex-wrap: wrap;' +
-        '}' +
+        '.status-btn:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
+        '.toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }' +
         '.toolbar button {' +
-        '    padding: 4px 10px;' +
-        '    font-size: 12px;' +
-        '    cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545);' +
-        '    border-radius: 4px;' +
+        '    padding: 4px 10px; font-size: 12px; cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 4px;' +
         '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
         '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
         '}' +
-        '.toolbar button:hover {' +
-        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
-        '}' +
+        '.toolbar button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
         '#chat {' +
-        '    flex: 1;' +
-        '    overflow-y: auto;' +
-        '    border: 1px solid var(--vscode-widget-border, #454545);' +
-        '    border-radius: 6px;' +
-        '    padding: 10px;' +
-        '    background: var(--vscode-editor-background, #1e1e1e);' +
-        '    margin-bottom: 8px;' +
+        '    flex: 1; overflow-y: auto;' +
+        '    border: 1px solid var(--vscode-widget-border, #454545); border-radius: 6px;' +
+        '    padding: 10px; background: var(--vscode-editor-background, #1e1e1e); margin-bottom: 8px;' +
         '}' +
-        '.message {' +
-        '    margin-bottom: 10px;' +
-        '    padding: 10px;' +
-        '    border-radius: 6px;' +
-        '    word-wrap: break-word;' +
-        '}' +
+        '.message { margin-bottom: 10px; padding: 10px; border-radius: 6px; word-wrap: break-word; }' +
         '.user-message {' +
         '    background: var(--vscode-textBlockQuote-background, #2a2d2e);' +
         '    border-left: 4px solid var(--vscode-textLink-foreground, #3794ff);' +
@@ -984,92 +1151,44 @@ function getWebviewContent(chatHistory, loading, config) {
         '.code-block {' +
         '    background: var(--vscode-textCodeBlock-background, #0a0a0a);' +
         '    color: var(--vscode-editor-foreground, #d4d4d4);' +
-        '    border-radius: 6px;' +
-        '    margin: 8px 0;' +
-        '    overflow: hidden;' +
+        '    border-radius: 6px; margin: 8px 0; overflow: hidden;' +
         '    border: 1px solid var(--vscode-widget-border, #454545);' +
         '}' +
         '.code-header {' +
         '    background: var(--vscode-editorGroupHeader-tabsBackground, #252526);' +
         '    color: var(--vscode-foreground, #cccccc);' +
-        '    padding: 6px 10px;' +
-        '    display: flex;' +
-        '    align-items: center;' +
-        '    justify-content: space-between;' +
-        '    font-size: 12px;' +
-        '    flex-wrap: wrap;' +
-        '    gap: 6px;' +
+        '    padding: 6px 10px; display: flex; align-items: center; justify-content: space-between;' +
+        '    font-size: 12px; flex-wrap: wrap; gap: 6px;' +
         '}' +
         '.code-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
         '.code-btn {' +
-        '    padding: 3px 8px;' +
-        '    font-size: 11px;' +
-        '    cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545);' +
-        '    border-radius: 3px;' +
+        '    padding: 3px 8px; font-size: 11px; cursor: pointer;' +
+        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 3px;' +
         '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
         '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
         '}' +
-        '.code-btn:hover {' +
-        '    background: var(--vscode-button-secondaryHoverBackground, #45494e);' +
-        '}' +
-        'pre {' +
-        '    margin: 0;' +
-        '    padding: 12px;' +
-        '    overflow-x: auto;' +
-        '    font-size: 13px;' +
-        '}' +
-        'code {' +
-        '    font-family: var(--vscode-editor-font-family, "Consolas", "Courier New", monospace);' +
-        '    font-size: var(--vscode-editor-font-size, 13px);' +
-        '}' +
-        '.inline-code {' +
-        '    background: var(--vscode-textCodeBlock-background, #0a0a0a);' +
-        '    padding: 2px 5px;' +
-        '    border-radius: 3px;' +
-        '    font-size: 13px;' +
-        '}' +
-        '#form {' +
-        '    display: flex;' +
-        '    gap: 8px;' +
-        '}' +
+        '.code-btn:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
+        'pre { margin: 0; padding: 12px; overflow-x: auto; font-size: 13px; }' +
+        'code { font-family: var(--vscode-editor-font-family, "Consolas", "Courier New", monospace); font-size: var(--vscode-editor-font-size, 13px); }' +
+        '.inline-code { background: var(--vscode-textCodeBlock-background, #0a0a0a); padding: 2px 5px; border-radius: 3px; font-size: 13px; }' +
+        '#form { display: flex; gap: 8px; }' +
         '#input {' +
-        '    flex: 1;' +
-        '    padding: 10px;' +
-        '    font-size: 14px;' +
-        '    border: 1px solid var(--vscode-input-border, #454545);' +
-        '    border-radius: 6px;' +
-        '    outline: none;' +
+        '    flex: 1; padding: 10px; font-size: 14px;' +
+        '    border: 1px solid var(--vscode-input-border, #454545); border-radius: 6px; outline: none;' +
         '    background: var(--vscode-input-background, #3c3c3c);' +
         '    color: var(--vscode-input-foreground, #cccccc);' +
         '}' +
-        '#input:focus {' +
-        '    border-color: var(--vscode-focusBorder, #007fd4);' +
-        '}' +
-        '#input::placeholder {' +
-        '    color: var(--vscode-input-placeholderForeground, #999);' +
-        '}' +
+        '#input:focus { border-color: var(--vscode-focusBorder, #007fd4); }' +
+        '#input::placeholder { color: var(--vscode-input-placeholderForeground, #999); }' +
         '#form button {' +
-        '    padding: 10px 20px;' +
-        '    font-size: 14px;' +
-        '    cursor: pointer;' +
-        '    border: none;' +
-        '    border-radius: 6px;' +
+        '    padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 6px;' +
         '    background: var(--vscode-button-background, #0e639c);' +
         '    color: var(--vscode-button-foreground, #ffffff);' +
         '}' +
-        '#form button:hover {' +
-        '    background: var(--vscode-button-hoverBackground, #1177bb);' +
-        '}' +
-        '.empty-state {' +
-        '    color: var(--vscode-descriptionForeground, #999);' +
-        '    text-align: center;' +
-        '    padding: 40px;' +
-        '    font-size: 14px;' +
-        '}' +
-        // Scrollbar styling to match VS Code
+        '#form button:hover { background: var(--vscode-button-hoverBackground, #1177bb); }' +
+        '.empty-state { color: var(--vscode-descriptionForeground, #999); text-align: center; padding: 40px; font-size: 14px; }' +
         '#chat::-webkit-scrollbar { width: 10px; }' +
-        '#chat::-webkit-scrollbar-track { background: var(--vscode-scrollbarSlider-background, transparent); }' +
+        '#chat::-webkit-scrollbar-track { background: transparent; }' +
         '#chat::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, #79797966); border-radius: 5px; }' +
         '#chat::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, #646464b3); }' +
         '</style>' +
@@ -1086,6 +1205,7 @@ function getWebviewContent(chatHistory, loading, config) {
         '</div>' +
         '<div class="status-actions">' +
         '<button class="status-btn" id="changeModelBtn">Change Model</button>' +
+        '<button class="status-btn" id="fetchModelsBtn">Fetch Models</button>' +
         '<button class="status-btn" id="changeEndpointBtn">Change Endpoint</button>' +
         '</div>' +
         '</div>' +
@@ -1094,7 +1214,11 @@ function getWebviewContent(chatHistory, loading, config) {
         '<button id="clearChatBtn">🗑️ Clear Chat</button>' +
         '</div>' +
         '<div id="chat">' +
-        (chatHtml || '<div class="empty-state">Start a conversation...<br><br>Try: "Create a Python script called hello.py that prints Hello World"</div>') +
+        (chatHtml || '<div class="empty-state">Start a conversation...<br><br>' +
+            'Try: "Create a Python script called hello.py that prints Hello World"<br><br>' +
+            'Powered by Ask Sage API<br>' +
+            '<a href="https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html" style="color: var(--vscode-textLink-foreground, #3794ff);">API Documentation</a>' +
+            '</div>') +
         '</div>' +
         '<form id="form">' +
         '<input id="input" type="text" placeholder="Ask me to write code, create a file, edit a file..." autofocus />' +
@@ -1119,6 +1243,9 @@ function getWebviewContent(chatHistory, loading, config) {
         '});' +
         'document.getElementById("changeModelBtn").addEventListener("click", function() {' +
         '    vscode.postMessage({ command: "changeModel" });' +
+        '});' +
+        'document.getElementById("fetchModelsBtn").addEventListener("click", function() {' +
+        '    vscode.postMessage({ command: "fetchModels" });' +
         '});' +
         'document.getElementById("changeEndpointBtn").addEventListener("click", function() {' +
         '    vscode.postMessage({ command: "changeEndpoint" });' +
