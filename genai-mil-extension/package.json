@@ -1,0 +1,53 @@
+{
+  "name": "genai-mil-connector",
+  "displayName": "GenAI.mil Connector",
+  "description": "Connect to GenAI.mil APIs from VS Code",
+  "version": "1.0.0",
+  "publisher": "genai-mil",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:genai-mil.query"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "genai-mil.query",
+        "title": "GenAI.mil: Send Query"
+      },
+      {
+        "command": "genai-mil.setApiKey",
+        "title": "GenAI.mil: Set API Key"
+      },
+      {
+        "command": "genai-mil.selectEndpoint",
+        "title": "GenAI.mil: Select Endpoint"
+      }
+    ],
+    "configuration": {
+      "title": "GenAI.mil",
+      "properties": {
+        "genai-mil.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for GenAI.mil"
+        },
+        "genai-mil.endpoint": {
+          "type": "string",
+          "default": "https://api.genai.mil/v1/chat/completions",
+          "enum": [
+            "https://api.genai.mil/v1/chat/completions",
+            "https://genai.mil/api/v1"
+          ],
+          "description": "API Endpoint to use"
+        },
+        "genai-mil.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Model to use for completions"
+        }
+      }
+    }
+  }
+}
