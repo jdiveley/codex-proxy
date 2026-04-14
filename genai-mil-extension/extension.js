@@ -1,9 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-// GenAI.mil VS Code Extension - Full Interactive Chat
-// Uses only built-in VS Code and Node.js core modules
-// No external dependencies required
-// ═══════════════════════════════════════════════════════════════
-
 const vscode = require('vscode');
 const https = require('https');
 
@@ -104,10 +98,12 @@ function activate(context) {
     });
 
     // ─────────────────────────────────────────────
-    // COMMAND: Select Endpoint
+    // COMMAND: Select Endpoint (with custom endpoints)
     // ─────────────────────────────────────────────
     var selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
-        var endpoint = await vscode.window.showQuickPick([
+        const config = vscode.workspace.getConfiguration('genai-mil');
+        const customEndpoints = config.get('customEndpoints') || [];
+        const defaultEndpoints = [
             {
                 label: 'Chat Completions API',
                 description: 'https://api.genai.mil/v1/chat/completions',
@@ -118,12 +114,121 @@ function activate(context) {
                 description: 'https://genai.mil/api/v1',
                 value: 'https://genai.mil/api/v1'
             }
-        ], {
-            placeHolder: 'Select API Endpoint'
+        ];
+
+        // Add custom endpoints to the list
+        const customItems = customEndpoints.map(url => ({
+            label: 'Custom Endpoint',
+            description: url,
+            value: url
+        }));
+
+        // Add an option to add a new endpoint
+        const addNewItem = {
+            label: '➕ Add New Endpoint',
+            description: 'Enter a custom GenAI.mil API endpoint URL',
+            value: '__add__'
+        };
+
+        const allItems = [...defaultEndpoints, ...customItems, addNewItem];
+
+        const endpoint = await vscode.window.showQuickPick(allItems, {
+            placeHolder: 'Select or add an API Endpoint'
         });
-        if (endpoint) {
-            await vscode.workspace.getConfiguration('genai-mil').update('endpoint', endpoint.value, true);
-            vscode.window.showInformationMessage('Endpoint set to: ' + endpoint.label);
+
+        if (!endpoint) return;
+
+        if (endpoint.value === '__add__') {
+            // Prompt for new endpoint URL
+            const newUrl = await vscode.window.showInputBox({
+                prompt: 'Enter the custom GenAI.mil API endpoint URL',
+                placeHolder: 'https://your.custom.endpoint/v1/chat/completions',
+                ignoreFocusOut: true
+            });
+            if (newUrl && /^https?:\/\/.+/.test(newUrl)) {
+                // Add to customEndpoints array
+                const updated = [...customEndpoints, newUrl];
+                await config.update('customEndpoints', updated, true);
+                await config.update('endpoint', newUrl, true);
+                vscode.window.showInformationMessage(`Custom endpoint added and selected: ${newUrl}`);
+            } else if (newUrl) {
+                vscode.window.showErrorMessage('Invalid URL. Must start with http:// or https://');
+            }
+        } else {
+            await config.update('endpoint', endpoint.value, true);
+            vscode.window.showInformationMessage(`Endpoint set to: ${endpoint.description || endpoint.value}`);
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Select Model (fetches from API)
+    // ─────────────────────────────────────────────
+    var selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
+        const config = vscode.workspace.getConfiguration('genai-mil');
+        const apiKey = config.get('apiKey');
+        const endpoint = config.get('endpoint');
+
+        // Try to guess the models endpoint
+        let modelsUrl;
+        if (endpoint.includes('/chat/completions')) {
+            modelsUrl = endpoint.replace(/\/chat\/completions.*/, '/models');
+        } else if (endpoint.endsWith('/v1')) {
+            modelsUrl = endpoint + '/models';
+        } else {
+            modelsUrl = endpoint + '/models';
+        }
+
+        // Make HTTPS GET request to /models
+        try {
+            const models = await new Promise((resolve, reject) => {
+                const url = new URL(modelsUrl);
+                const options = {
+                    hostname: url.hostname,
+                    port: 443,
+                    path: url.pathname + url.search,
+                    method: 'GET',
+                    headers: {
+                        'Authorization': 'Bearer ' + apiKey,
+                        'Content-Type': 'application/json'
+                    }
+                };
+                const req = https.request(options, (res) => {
+                    let data = '';
+                    res.on('data', (chunk) => { data += chunk; });
+                    res.on('end', () => {
+                        try {
+                            const parsed = JSON.parse(data);
+                            // OpenAI-style: { data: [ {id: 'model1'}, ... ] }
+                            if (parsed.data && Array.isArray(parsed.data)) {
+                                resolve(parsed.data.map(m => m.id));
+                            } else if (Array.isArray(parsed.models)) {
+                                resolve(parsed.models.map(m => m.id || m.name));
+                            } else {
+                                reject(new Error('No models found in response'));
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    });
+                });
+                req.on('error', (e) => reject(e));
+                req.end();
+            });
+
+            if (!models.length) {
+                vscode.window.showErrorMessage('No models found at: ' + modelsUrl);
+                return;
+            }
+
+            const selected = await vscode.window.showQuickPick(models, {
+                placeHolder: 'Select a model'
+            });
+            if (selected) {
+                await config.update('model', selected, true);
+                vscode.window.showInformationMessage('Model set to: ' + selected);
+            }
+        } catch (err) {
+            vscode.window.showErrorMessage('Failed to fetch models: ' + err.message);
         }
     });
 
@@ -375,7 +480,7 @@ function activate(context) {
     });
 
     // Register all commands
-    context.subscriptions.push(setApiKeyCommand, selectEndpointCommand, openChatCommand);
+    context.subscriptions.push(setApiKeyCommand, selectEndpointCommand, selectModelCommand, openChatCommand);
 }
 
 // ───────────────────────────────────────────────────────────────

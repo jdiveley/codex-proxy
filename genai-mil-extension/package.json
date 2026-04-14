@@ -1,8 +1,8 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat and file editing",
-  "version": "2.0.0",
+  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat, file editing, custom endpoints, and model selection",
+  "version": "2.1.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -10,7 +10,8 @@
   "activationEvents": [
     "onCommand:genai-mil.openChat",
     "onCommand:genai-mil.setApiKey",
-    "onCommand:genai-mil.selectEndpoint"
+    "onCommand:genai-mil.selectEndpoint",
+    "onCommand:genai-mil.selectModel"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -26,6 +27,10 @@
       {
         "command": "genai-mil.selectEndpoint",
         "title": "GenAI.mil: Select Endpoint"
+      },
+      {
+        "command": "genai-mil.selectModel",
+        "title": "GenAI.mil: Select Model"
       }
     ],
     "configuration": {
@@ -39,16 +44,20 @@
         "genai-mil.endpoint": {
           "type": "string",
           "default": "https://api.genai.mil/v1/chat/completions",
-          "enum": [
-            "https://api.genai.mil/v1/chat/completions",
-            "https://genai.mil/api/v1"
-          ],
           "description": "API Endpoint to use"
         },
         "genai-mil.model": {
           "type": "string",
           "default": "gemini-2.5-flash",
           "description": "Model to use for completions"
+        },
+        "genai-mil.customEndpoints": {
+          "type": "array",
+          "default": [],
+          "description": "Custom GenAI.mil API endpoints (array of URLs)",
+          "items": {
+            "type": "string"
+          }
         }
       }
     }
