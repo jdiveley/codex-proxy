@@ -1,20 +1,23 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil APIs from VS Code",
-  "version": "1.0.0",
-  "publisher": "genai-mil",
+  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat and file editing",
+  "version": "2.0.0",
   "engines": {
     "vscode": "^1.60.0"
   },
   "categories": ["Other"],
-  "activationEvents": ["onCommand:genai-mil.query"],
+  "activationEvents": [
+    "onCommand:genai-mil.openChat",
+    "onCommand:genai-mil.setApiKey",
+    "onCommand:genai-mil.selectEndpoint"
+  ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "genai-mil.query",
-        "title": "GenAI.mil: Send Query"
+        "command": "genai-mil.openChat",
+        "title": "GenAI.mil: Open Chat"
       },
       {
         "command": "genai-mil.setApiKey",
