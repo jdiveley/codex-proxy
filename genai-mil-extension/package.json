@@ -1,8 +1,8 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat, file editing, custom endpoints, model selection, and PEM support",
-  "version": "2.2.0",
+  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat and file editing",
+  "version": "2.0.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -11,9 +11,7 @@
     "onCommand:genai-mil.openChat",
     "onCommand:genai-mil.setApiKey",
     "onCommand:genai-mil.selectEndpoint",
-    "onCommand:genai-mil.selectModel",
-    "onCommand:genai-mil.setPemPath",
-    "onCommand:genai-mil.setBaseUrl"
+    "onCommand:genai-mil.setPemCert"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -31,16 +29,8 @@
         "title": "GenAI.mil: Select Endpoint"
       },
       {
-        "command": "genai-mil.selectModel",
-        "title": "GenAI.mil: Select Model"
-      },
-      {
-        "command": "genai-mil.setPemPath",
+        "command": "genai-mil.setPemCert",
         "title": "GenAI.mil: Set PEM Certificate"
-      },
-      {
-        "command": "genai-mil.setBaseUrl",
-        "title": "GenAI.mil: Set Custom Base URL"
       }
     ],
     "configuration": {
@@ -54,6 +44,10 @@
         "genai-mil.endpoint": {
           "type": "string",
           "default": "https://api.genai.mil/v1/chat/completions",
+          "enum": [
+            "https://api.genai.mil/v1/chat/completions",
+            "https://genai.mil/api/v1"
+          ],
           "description": "API Endpoint to use"
         },
         "genai-mil.model": {
@@ -61,23 +55,10 @@
           "default": "gemini-2.5-flash",
           "description": "Model to use for completions"
         },
-        "genai-mil.customEndpoints": {
-          "type": "array",
-          "default": [],
-          "description": "Custom GenAI.mil API endpoints (array of URLs)",
-          "items": {
-            "type": "string"
-          }
-        },
         "genai-mil.pemPath": {
           "type": "string",
           "default": "",
-          "description": "Path to PEM certificate for custom endpoints (NODE_EXTRA_CA_CERTS)"
-        },
-        "genai-mil.baseUrl": {
-          "type": "string",
-          "default": "",
-          "description": "Custom API base URL (e.g., for Anthropic)"
+          "description": "Path to PEM certificate file for SSL/TLS connections"
         }
       }
     }

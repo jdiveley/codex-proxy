@@ -2,28 +2,17 @@ const vscode = require('vscode');
 const https = require('https');
 const fs = require('fs');
 
-// ───────────────────────────────────────────────────────────────
-// HELPER: Make HTTPS POST request with streaming support and PEM
-// ───────────────────────────────────────────────────────────────
-function streamRequest(endpoint, apiKey, model, messages, caPath, onData, onDone, onError) {
-    var url = new URL(endpoint);
+// Helper: Make HTTPS POST request with streaming support and optional PEM certificate
+function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
+    const url = new URL(endpoint);
 
-    var payload = JSON.stringify({
+    const payload = JSON.stringify({
         model: model,
         messages: messages,
         stream: true
     });
 
-    let ca;
-    if (caPath) {
-        try {
-            ca = fs.readFileSync(caPath);
-        } catch (e) {
-            vscode.window.showErrorMessage('Could not read PEM file: ' + caPath);
-        }
-    }
-
-    var options = {
+    const options = {
         hostname: url.hostname,
         port: 443,
         path: url.pathname,
@@ -32,30 +21,38 @@ function streamRequest(endpoint, apiKey, model, messages, caPath, onData, onDone
             'Authorization': 'Bearer ' + apiKey,
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload)
-        },
-        ca: ca // Add the CA certificate if set
+        }
     };
 
-    var req = https.request(options, function (res) {
-        var buffer = '';
+    // Add PEM certificate if provided
+    if (pemPath) {
+        try {
+            options.ca = fs.readFileSync(pemPath);
+        } catch (e) {
+            // If PEM file cannot be read, continue without it
+        }
+    }
+
+    const req = https.request(options, function (res) {
+        let buffer = '';
 
         res.on('data', function (chunk) {
             buffer += chunk.toString();
 
-            var lines = buffer.split('\n');
+            const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
-            for (var i = 0; i < lines.length; i++) {
-                var line = lines[i];
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
                 if (line.startsWith('data: ')) {
-                    var data = line.slice(6).trim();
+                    const data = line.slice(6).trim();
 
                     if (data === '[DONE]') {
                         continue;
                     }
 
                     try {
-                        var parsed = JSON.parse(data);
+                        const parsed = JSON.parse(data);
                         if (parsed.choices &&
                             parsed.choices[0] &&
                             parsed.choices[0].delta &&
@@ -86,17 +83,12 @@ function streamRequest(endpoint, apiKey, model, messages, caPath, onData, onDone
     req.end();
 }
 
-// ───────────────────────────────────────────────────────────────
-// ACTIVATION
-// ───────────────────────────────────────────────────────────────
 function activate(context) {
     console.log('GenAI.mil extension is now active');
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set API Key
-    // ─────────────────────────────────────────────
-    var setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
-        var apiKey = await vscode.window.showInputBox({
+    // Set API Key Command
+    const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
+        const apiKey = await vscode.window.showInputBox({
             prompt: 'Enter your GenAI.mil API Key',
             password: true,
             placeHolder: 'YOUR_API_KEY',
@@ -108,45 +100,9 @@ function activate(context) {
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set PEM Certificate
-    // ─────────────────────────────────────────────
-    var setPemPathCommand = vscode.commands.registerCommand('genai-mil.setPemPath', async function () {
-        const uri = await vscode.window.showOpenDialog({
-            canSelectMany: false,
-            openLabel: 'Select PEM Certificate',
-            filters: { 'PEM files': ['pem'], 'All files': ['*'] }
-        });
-        if (uri && uri[0]) {
-            await vscode.workspace.getConfiguration('genai-mil').update('pemPath', uri[0].fsPath, true);
-            vscode.window.showInformationMessage('PEM certificate set: ' + uri[0].fsPath);
-        }
-    });
-
-    // ─────────────────────────────────────────────
-    // COMMAND: Set Custom Base URL
-    // ─────────────────────────────────────────────
-    var setBaseUrlCommand = vscode.commands.registerCommand('genai-mil.setBaseUrl', async function () {
-        const url = await vscode.window.showInputBox({
-            prompt: 'Enter custom API base URL (e.g., for Anthropic)',
-            placeHolder: 'https://api.genai.army.mil/server/anthropic/',
-            ignoreFocusOut: true
-        });
-        if (url && /^https?:\/\/.+/.test(url)) {
-            await vscode.workspace.getConfiguration('genai-mil').update('baseUrl', url, true);
-            vscode.window.showInformationMessage('Custom base URL set: ' + url);
-        } else if (url) {
-            vscode.window.showErrorMessage('Invalid URL. Must start with http:// or https://');
-        }
-    });
-
-    // ─────────────────────────────────────────────
-    // COMMAND: Select Endpoint (with custom endpoints)
-    // ─────────────────────────────────────────────
-    var selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
-        const config = vscode.workspace.getConfiguration('genai-mil');
-        const customEndpoints = config.get('customEndpoints') || [];
-        const defaultEndpoints = [
+    // Select Endpoint Command
+    const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
+        const endpoint = await vscode.window.showQuickPick([
             {
                 label: 'Chat Completions API',
                 description: 'https://api.genai.mil/v1/chat/completions',
@@ -157,140 +113,38 @@ function activate(context) {
                 description: 'https://genai.mil/api/v1',
                 value: 'https://genai.mil/api/v1'
             }
-        ];
+        ], {
+            placeHolder: 'Select API Endpoint'
+        });
+        if (endpoint) {
+            await vscode.workspace.getConfiguration('genai-mil').update('endpoint', endpoint.value, true);
+            vscode.window.showInformationMessage('Endpoint set to: ' + endpoint.label);
+        }
+    });
 
-        // Add custom endpoints to the list
-        const customItems = customEndpoints.map(url => ({
-            label: 'Custom Endpoint',
-            description: url,
-            value: url
-        }));
-
-        // Add an option to add a new endpoint
-        const addNewItem = {
-            label: '➕ Add New Endpoint',
-            description: 'Enter a custom GenAI.mil API endpoint URL',
-            value: '__add__'
-        };
-
-        const allItems = [...defaultEndpoints, ...customItems, addNewItem];
-
-        const endpoint = await vscode.window.showQuickPick(allItems, {
-            placeHolder: 'Select or add an API Endpoint'
+    // Set PEM Certificate Command
+    const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
+        const fileUri = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: false,
+            filters: {
+                'PEM Certificate': ['pem', 'crt', 'cer'],
+                'All Files': ['*']
+            },
+            openLabel: 'Select PEM Certificate'
         });
 
-        if (!endpoint) return;
-
-        if (endpoint.value === '__add__') {
-            // Prompt for new endpoint URL
-            const newUrl = await vscode.window.showInputBox({
-                prompt: 'Enter the custom GenAI.mil API endpoint URL',
-                placeHolder: 'https://your.custom.endpoint/v1/chat/completions',
-                ignoreFocusOut: true
-            });
-            if (newUrl && /^https?:\/\/.+/.test(newUrl)) {
-                // Add to customEndpoints array
-                const updated = [...customEndpoints, newUrl];
-                await config.update('customEndpoints', updated, true);
-                await config.update('endpoint', newUrl, true);
-                vscode.window.showInformationMessage(`Custom endpoint added and selected: ${newUrl}`);
-            } else if (newUrl) {
-                vscode.window.showErrorMessage('Invalid URL. Must start with http:// or https://');
-            }
-        } else {
-            await config.update('endpoint', endpoint.value, true);
-            vscode.window.showInformationMessage(`Endpoint set to: ${endpoint.description || endpoint.value}`);
+        if (fileUri && fileUri[0]) {
+            const pemPath = fileUri[0].fsPath;
+            await vscode.workspace.getConfiguration('genai-mil').update('pemPath', pemPath, true);
+            vscode.window.showInformationMessage('PEM Certificate set: ' + pemPath);
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Select Model (fetches from API)
-    // ─────────────────────────────────────────────
-    var selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
-        const config = vscode.workspace.getConfiguration('genai-mil');
-        const apiKey = config.get('apiKey');
-        const endpoint = config.get('endpoint');
-        const pemPath = config.get('pemPath');
-
-        // Try to guess the models endpoint
-        let modelsUrl;
-        if (endpoint.includes('/chat/completions')) {
-            modelsUrl = endpoint.replace(/\/chat\/completions.*/, '/models');
-        } else if (endpoint.endsWith('/v1')) {
-            modelsUrl = endpoint + '/models';
-        } else {
-            modelsUrl = endpoint + '/models';
-        }
-
-        // Make HTTPS GET request to /models
-        try {
-            const models = await new Promise((resolve, reject) => {
-                const url = new URL(modelsUrl);
-                let ca;
-                if (pemPath) {
-                    try {
-                        ca = fs.readFileSync(pemPath);
-                    } catch (e) {
-                        vscode.window.showErrorMessage('Could not read PEM file: ' + pemPath);
-                    }
-                }
-                const options = {
-                    hostname: url.hostname,
-                    port: 443,
-                    path: url.pathname + url.search,
-                    method: 'GET',
-                    headers: {
-                        'Authorization': 'Bearer ' + apiKey,
-                        'Content-Type': 'application/json'
-                    },
-                    ca: ca
-                };
-                const req = https.request(options, (res) => {
-                    let data = '';
-                    res.on('data', (chunk) => { data += chunk; });
-                    res.on('end', () => {
-                        try {
-                            const parsed = JSON.parse(data);
-                            if (parsed.data && Array.isArray(parsed.data)) {
-                                resolve(parsed.data.map(m => m.id));
-                            } else if (Array.isArray(parsed.models)) {
-                                resolve(parsed.models.map(m => m.id || m.name));
-                            } else {
-                                reject(new Error('No models found in response'));
-                            }
-                        } catch (e) {
-                            reject(e);
-                        }
-                    });
-                });
-                req.on('error', (e) => reject(e));
-                req.end();
-            });
-
-            if (!models.length) {
-                vscode.window.showErrorMessage('No models found at: ' + modelsUrl);
-                return;
-            }
-
-            const selected = await vscode.window.showQuickPick(models, {
-                placeHolder: 'Select a model'
-            });
-            if (selected) {
-                await config.update('model', selected, true);
-                vscode.window.showInformationMessage('Model set to: ' + selected);
-            }
-        } catch (err) {
-            vscode.window.showErrorMessage('Failed to fetch models: ' + err.message);
-        }
-    });
-
-    // ─────────────────────────────────────────────
-    // COMMAND: Open Chat
-    // ─────────────────────────────────────────────
-    var openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
-
-        // Create the webview panel
-        var panel = vscode.window.createWebviewPanel(
+    // Open Chat Command
+    const openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
+        const panel = vscode.window.createWebviewPanel(
             'genaiMilChat',
             'GenAI.mil Chat',
             vscode.ViewColumn.One,
@@ -300,56 +154,36 @@ function activate(context) {
             }
         );
 
-        // Chat history
-        var chatHistory = [];
+        let chatHistory = [];
 
-        // Set initial HTML
         panel.webview.html = getWebviewContent(chatHistory, false);
 
-        // ─────────────────────────────────────────
-        // Handle messages from the webview
-        // ─────────────────────────────────────────
         panel.webview.onDidReceiveMessage(async function (message) {
-            var config = vscode.workspace.getConfiguration('genai-mil');
-            var apiKey = config.get('apiKey');
-            var endpoint = config.get('endpoint');
-            var model = config.get('model');
-            var pemPath = config.get('pemPath');
-            var baseUrl = config.get('baseUrl');
+            const config = vscode.workspace.getConfiguration('genai-mil');
+            const apiKey = config.get('apiKey');
+            const endpoint = config.get('endpoint');
+            const model = config.get('model');
+            const pemPath = config.get('pemPath');
 
-            // If baseUrl is set, override endpoint
-            if (baseUrl && baseUrl.trim().length > 0) {
-                endpoint = baseUrl;
-            }
-
-            // ─────────────────────────────────────
-            // CLEAR CHAT
-            // ─────────────────────────────────────
+            // Clear Chat
             if (message.command === 'clearChat') {
                 chatHistory = [];
                 panel.webview.html = getWebviewContent(chatHistory, false);
                 return;
             }
 
-            // ─────────────────────────────────────
-            // SEND MESSAGE TO API
-            // ─────────────────────────────────────
+            // Send Message
             if (message.command === 'send') {
-
-                // Validate API key
                 if (!apiKey) {
                     vscode.window.showErrorMessage('API Key not set. Run "GenAI.mil: Set API Key" first.');
                     return;
                 }
 
-                var userMessage = message.text;
-
-                // Add user message to history
+                const userMessage = message.text;
                 chatHistory.push({ role: 'user', content: userMessage });
                 panel.webview.html = getWebviewContent(chatHistory, true);
 
-                // Build messages with system prompt
-                var apiMessages = [
+                const apiMessages = [
                     {
                         role: 'system',
                         content: 'You are a helpful coding assistant inside VS Code. ' +
@@ -360,59 +194,44 @@ function activate(context) {
                             '```\n' +
                             'If editing an existing file, include the complete updated file content. ' +
                             'Always provide complete, working code.'
-                    }
+                    },
+                    ...chatHistory
                 ];
 
-                // Add chat history to messages
-                for (var i = 0; i < chatHistory.length; i++) {
-                    apiMessages.push(chatHistory[i]);
-                }
+                let aiMessage = '';
 
-                // Collect the AI response
-                var aiMessage = '';
-
-                // Make the streaming request
                 streamRequest(
                     endpoint,
                     apiKey,
                     model,
                     apiMessages,
-                    pemPath,
-                    // onData callback - called for each chunk
                     function (content) {
                         aiMessage += content;
-                        panel.webview.postMessage({
-                            command: 'stream',
-                            text: aiMessage
-                        });
+                        panel.webview.postMessage({ command: 'stream', text: aiMessage });
                     },
-                    // onDone callback - called when stream ends
                     function () {
                         chatHistory.push({ role: 'assistant', content: aiMessage });
                         panel.webview.html = getWebviewContent(chatHistory, false);
                     },
-                    // onError callback - called on error
                     function (error) {
                         chatHistory.push({ role: 'assistant', content: 'Error: ' + error.message });
                         panel.webview.html = getWebviewContent(chatHistory, false);
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
-                    }
+                    },
+                    pemPath
                 );
             }
 
-            // ─────────────────────────────────────
-            // CREATE A NEW FILE
-            // ─────────────────────────────────────
+            // Create File
             if (message.command === 'createFile') {
-                var filename = message.filename;
-                var content = message.content;
+                const filename = message.filename;
+                const content = message.content;
 
                 if (vscode.workspace.workspaceFolders) {
-                    var workspaceUri = vscode.workspace.workspaceFolders[0].uri;
-                    var fileUri = vscode.Uri.joinPath(workspaceUri, filename);
+                    const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
+                    const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
 
-                    // Check if file exists
-                    var fileExists = false;
+                    let fileExists = false;
                     try {
                         await vscode.workspace.fs.stat(fileUri);
                         fileExists = true;
@@ -421,7 +240,7 @@ function activate(context) {
                     }
 
                     if (fileExists) {
-                        var overwrite = await vscode.window.showWarningMessage(
+                        const overwrite = await vscode.window.showWarningMessage(
                             'File "' + filename + '" already exists. Overwrite?',
                             'Yes', 'No'
                         );
@@ -430,46 +249,42 @@ function activate(context) {
                         }
                     }
 
-                    // Write the file
-                    var encoder = new TextEncoder();
+                    const encoder = new TextEncoder();
                     await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
                     vscode.window.showInformationMessage('File created: ' + filename);
 
-                    // Open the file
-                    var doc = await vscode.workspace.openTextDocument(fileUri);
+                    const doc = await vscode.workspace.openTextDocument(fileUri);
                     await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
 
                 } else {
-                    var uri = await vscode.window.showSaveDialog({
+                    const uri = await vscode.window.showSaveDialog({
                         defaultUri: vscode.Uri.file(filename),
                         saveLabel: 'Save File'
                     });
                     if (uri) {
-                        var enc = new TextEncoder();
+                        const enc = new TextEncoder();
                         await vscode.workspace.fs.writeFile(uri, enc.encode(content));
                         vscode.window.showInformationMessage('File saved: ' + uri.fsPath);
-                        var d = await vscode.workspace.openTextDocument(uri);
+                        const d = await vscode.workspace.openTextDocument(uri);
                         await vscode.window.showTextDocument(d, vscode.ViewColumn.Beside);
                     }
                 }
             }
 
-            // ─────────────────────────────────────
-            // EDIT AN EXISTING FILE
-            // ─────────────────────────────────────
+            // Edit File
             if (message.command === 'editFile') {
-                var editFilename = message.filename;
-                var editContent = message.content;
+                const editFilename = message.filename;
+                const editContent = message.content;
 
                 if (vscode.workspace.workspaceFolders) {
-                    var wsUri = vscode.workspace.workspaceFolders[0].uri;
-                    var editFileUri = vscode.Uri.joinPath(wsUri, editFilename);
+                    const wsUri = vscode.workspace.workspaceFolders[0].uri;
+                    const editFileUri = vscode.Uri.joinPath(wsUri, editFilename);
 
                     try {
-                        var editDoc = await vscode.workspace.openTextDocument(editFileUri);
-                        var editor = await vscode.window.showTextDocument(editDoc, vscode.ViewColumn.Beside);
+                        const editDoc = await vscode.workspace.openTextDocument(editFileUri);
+                        const editor = await vscode.window.showTextDocument(editDoc, vscode.ViewColumn.Beside);
 
-                        var fullRange = new vscode.Range(
+                        const fullRange = new vscode.Range(
                             editDoc.positionAt(0),
                             editDoc.positionAt(editDoc.getText().length)
                         );
@@ -481,9 +296,9 @@ function activate(context) {
                         vscode.window.showInformationMessage('File updated: ' + editFilename);
 
                     } catch (e) {
-                        var enc2 = new TextEncoder();
+                        const enc2 = new TextEncoder();
                         await vscode.workspace.fs.writeFile(editFileUri, enc2.encode(editContent));
-                        var newDoc = await vscode.workspace.openTextDocument(editFileUri);
+                        const newDoc = await vscode.workspace.openTextDocument(editFileUri);
                         await vscode.window.showTextDocument(newDoc, vscode.ViewColumn.Beside);
                         vscode.window.showInformationMessage('File created: ' + editFilename);
                     }
@@ -492,11 +307,9 @@ function activate(context) {
                 }
             }
 
-            // ─────────────────────────────────────
-            // INSERT CODE AT CURSOR
-            // ─────────────────────────────────────
+            // Insert at Cursor
             if (message.command === 'insertAtCursor') {
-                var activeEditor = vscode.window.activeTextEditor;
+                const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
                     await activeEditor.edit(function (editBuilder) {
                         editBuilder.insert(activeEditor.selection.active, message.content);
@@ -507,21 +320,19 @@ function activate(context) {
                 }
             }
 
-            // ─────────────────────────────────────
-            // SAVE CHAT HISTORY
-            // ─────────────────────────────────────
+            // Save Chat
             if (message.command === 'saveChat') {
-                var chatContent = '';
-                for (var j = 0; j < chatHistory.length; j++) {
-                    var who = chatHistory[j].role === 'user' ? '## You' : '## GenAI';
+                let chatContent = '';
+                for (let j = 0; j < chatHistory.length; j++) {
+                    const who = chatHistory[j].role === 'user' ? '## You' : '## GenAI';
                     chatContent += who + '\n\n' + chatHistory[j].content + '\n\n---\n\n';
                 }
 
-                var defaultSaveUri = vscode.workspace.workspaceFolders
+                const defaultSaveUri = vscode.workspace.workspaceFolders
                     ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'chat-history.md')
                     : undefined;
 
-                var saveUri = await vscode.window.showSaveDialog({
+                const saveUri = await vscode.window.showSaveDialog({
                     defaultUri: defaultSaveUri,
                     saveLabel: 'Save Chat History',
                     filters: {
@@ -531,7 +342,7 @@ function activate(context) {
                 });
 
                 if (saveUri) {
-                    var enc3 = new TextEncoder();
+                    const enc3 = new TextEncoder();
                     await vscode.workspace.fs.writeFile(saveUri, enc3.encode(chatContent));
                     vscode.window.showInformationMessage('Chat saved to ' + saveUri.fsPath);
                 }
@@ -539,39 +350,28 @@ function activate(context) {
         });
     });
 
-    // Register all commands
-    context.subscriptions.push(
-        setApiKeyCommand,
-        setPemPathCommand,
-        setBaseUrlCommand,
-        selectEndpointCommand,
-        selectModelCommand,
-        openChatCommand
-    );
+    context.subscriptions.push(setApiKeyCommand, selectEndpointCommand, setPemCertCommand, openChatCommand);
 }
 
-// ───────────────────────────────────────────────────────────────
-// WEBVIEW HTML CONTENT
-// ───────────────────────────────────────────────────────────────
+// Webview HTML content
 function getWebviewContent(chatHistory, loading) {
+    let chatHtml = '';
 
-    var chatHtml = '';
+    for (let i = 0; i < chatHistory.length; i++) {
+        const msg = chatHistory[i];
+        const isUser = msg.role === 'user';
+        const who = isUser ? 'You' : 'GenAI';
+        const bgColor = isUser ? '#e3f2fd' : '#f5f5f5';
+        const borderColor = isUser ? '#007acc' : '#4caf50';
+        const icon = isUser ? '👤' : '🤖';
 
-    for (var i = 0; i < chatHistory.length; i++) {
-        var msg = chatHistory[i];
-        var isUser = msg.role === 'user';
-        var who = isUser ? 'You' : 'GenAI';
-        var bgColor = isUser ? '#e3f2fd' : '#f5f5f5';
-        var borderColor = isUser ? '#007acc' : '#4caf50';
-        var icon = isUser ? '👤' : '🤖';
-
-        var content = escapeHtml(msg.content);
+        let content = escapeHtml(msg.content);
 
         // Parse code blocks with filename: ```language:filename
         content = content.replace(
             /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
             function (match, lang, filename, code) {
-                var safeFilename = filename.trim();
+                const safeFilename = filename.trim();
                 return '<div class="code-block">' +
                     '<div class="code-header">' +
                     '<span>📄 ' + safeFilename + ' (' + lang + ')</span>' +
@@ -710,9 +510,6 @@ function getWebviewContent(chatHistory, loading) {
         '</html>';
 }
 
-// ───────────────────────────────────────────────────────────────
-// HELPER: Escape HTML
-// ───────────────────────────────────────────────────────────────
 function escapeHtml(text) {
     return text
         .replace(/&/g, '&')
@@ -721,9 +518,6 @@ function escapeHtml(text) {
         .replace(/"/g, '"');
 }
 
-// ───────────────────────────────────────────────────────────────
-// DEACTIVATION
-// ───────────────────────────────────────────────────────────────
 function deactivate() {}
 
 module.exports = {
