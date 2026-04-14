@@ -1,10 +1,11 @@
 const vscode = require('vscode');
 const https = require('https');
+const fs = require('fs');
 
 // ───────────────────────────────────────────────────────────────
-// HELPER: Make HTTPS POST request with streaming support
+// HELPER: Make HTTPS POST request with streaming support and PEM
 // ───────────────────────────────────────────────────────────────
-function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError) {
+function streamRequest(endpoint, apiKey, model, messages, caPath, onData, onDone, onError) {
     var url = new URL(endpoint);
 
     var payload = JSON.stringify({
@@ -12,6 +13,15 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
         messages: messages,
         stream: true
     });
+
+    let ca;
+    if (caPath) {
+        try {
+            ca = fs.readFileSync(caPath);
+        } catch (e) {
+            vscode.window.showErrorMessage('Could not read PEM file: ' + caPath);
+        }
+    }
 
     var options = {
         hostname: url.hostname,
@@ -22,7 +32,8 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
             'Authorization': 'Bearer ' + apiKey,
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload)
-        }
+        },
+        ca: ca // Add the CA certificate if set
     };
 
     var req = https.request(options, function (res) {
@@ -98,6 +109,38 @@ function activate(context) {
     });
 
     // ─────────────────────────────────────────────
+    // COMMAND: Set PEM Certificate
+    // ─────────────────────────────────────────────
+    var setPemPathCommand = vscode.commands.registerCommand('genai-mil.setPemPath', async function () {
+        const uri = await vscode.window.showOpenDialog({
+            canSelectMany: false,
+            openLabel: 'Select PEM Certificate',
+            filters: { 'PEM files': ['pem'], 'All files': ['*'] }
+        });
+        if (uri && uri[0]) {
+            await vscode.workspace.getConfiguration('genai-mil').update('pemPath', uri[0].fsPath, true);
+            vscode.window.showInformationMessage('PEM certificate set: ' + uri[0].fsPath);
+        }
+    });
+
+    // ─────────────────────────────────────────────
+    // COMMAND: Set Custom Base URL
+    // ─────────────────────────────────────────────
+    var setBaseUrlCommand = vscode.commands.registerCommand('genai-mil.setBaseUrl', async function () {
+        const url = await vscode.window.showInputBox({
+            prompt: 'Enter custom API base URL (e.g., for Anthropic)',
+            placeHolder: 'https://api.genai.army.mil/server/anthropic/',
+            ignoreFocusOut: true
+        });
+        if (url && /^https?:\/\/.+/.test(url)) {
+            await vscode.workspace.getConfiguration('genai-mil').update('baseUrl', url, true);
+            vscode.window.showInformationMessage('Custom base URL set: ' + url);
+        } else if (url) {
+            vscode.window.showErrorMessage('Invalid URL. Must start with http:// or https://');
+        }
+    });
+
+    // ─────────────────────────────────────────────
     // COMMAND: Select Endpoint (with custom endpoints)
     // ─────────────────────────────────────────────
     var selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
@@ -167,6 +210,7 @@ function activate(context) {
         const config = vscode.workspace.getConfiguration('genai-mil');
         const apiKey = config.get('apiKey');
         const endpoint = config.get('endpoint');
+        const pemPath = config.get('pemPath');
 
         // Try to guess the models endpoint
         let modelsUrl;
@@ -182,6 +226,14 @@ function activate(context) {
         try {
             const models = await new Promise((resolve, reject) => {
                 const url = new URL(modelsUrl);
+                let ca;
+                if (pemPath) {
+                    try {
+                        ca = fs.readFileSync(pemPath);
+                    } catch (e) {
+                        vscode.window.showErrorMessage('Could not read PEM file: ' + pemPath);
+                    }
+                }
                 const options = {
                     hostname: url.hostname,
                     port: 443,
@@ -190,7 +242,8 @@ function activate(context) {
                     headers: {
                         'Authorization': 'Bearer ' + apiKey,
                         'Content-Type': 'application/json'
-                    }
+                    },
+                    ca: ca
                 };
                 const req = https.request(options, (res) => {
                     let data = '';
@@ -198,7 +251,6 @@ function activate(context) {
                     res.on('end', () => {
                         try {
                             const parsed = JSON.parse(data);
-                            // OpenAI-style: { data: [ {id: 'model1'}, ... ] }
                             if (parsed.data && Array.isArray(parsed.data)) {
                                 resolve(parsed.data.map(m => m.id));
                             } else if (Array.isArray(parsed.models)) {
@@ -262,6 +314,13 @@ function activate(context) {
             var apiKey = config.get('apiKey');
             var endpoint = config.get('endpoint');
             var model = config.get('model');
+            var pemPath = config.get('pemPath');
+            var baseUrl = config.get('baseUrl');
+
+            // If baseUrl is set, override endpoint
+            if (baseUrl && baseUrl.trim().length > 0) {
+                endpoint = baseUrl;
+            }
 
             // ─────────────────────────────────────
             // CLEAR CHAT
@@ -318,6 +377,7 @@ function activate(context) {
                     apiKey,
                     model,
                     apiMessages,
+                    pemPath,
                     // onData callback - called for each chunk
                     function (content) {
                         aiMessage += content;
@@ -480,7 +540,14 @@ function activate(context) {
     });
 
     // Register all commands
-    context.subscriptions.push(setApiKeyCommand, selectEndpointCommand, selectModelCommand, openChatCommand);
+    context.subscriptions.push(
+        setApiKeyCommand,
+        setPemPathCommand,
+        setBaseUrlCommand,
+        selectEndpointCommand,
+        selectModelCommand,
+        openChatCommand
+    );
 }
 
 // ───────────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat, file editing, custom endpoints, and model selection",
-  "version": "2.1.0",
+  "description": "Connect to GenAI.mil APIs from VS Code with interactive chat, file editing, custom endpoints, model selection, and PEM support",
+  "version": "2.2.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -11,7 +11,9 @@
     "onCommand:genai-mil.openChat",
     "onCommand:genai-mil.setApiKey",
     "onCommand:genai-mil.selectEndpoint",
-    "onCommand:genai-mil.selectModel"
+    "onCommand:genai-mil.selectModel",
+    "onCommand:genai-mil.setPemPath",
+    "onCommand:genai-mil.setBaseUrl"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -31,6 +33,14 @@
       {
         "command": "genai-mil.selectModel",
         "title": "GenAI.mil: Select Model"
+      },
+      {
+        "command": "genai-mil.setPemPath",
+        "title": "GenAI.mil: Set PEM Certificate"
+      },
+      {
+        "command": "genai-mil.setBaseUrl",
+        "title": "GenAI.mil: Set Custom Base URL"
       }
     ],
     "configuration": {
@@ -58,6 +68,16 @@
           "items": {
             "type": "string"
           }
+        },
+        "genai-mil.pemPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to PEM certificate for custom endpoints (NODE_EXTRA_CA_CERTS)"
+        },
+        "genai-mil.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Custom API base URL (e.g., for Anthropic)"
         }
       }
     }
