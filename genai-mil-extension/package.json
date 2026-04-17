@@ -2,7 +2,7 @@
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
   "description": "Connect to GenAI.mil, Ask Sage, and Ask Sage Army (api.genai.army.mil) APIs from VS Code with interactive chat and file editing",
-  "version": "9.0.0",
+  "version": "9.1.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -90,7 +90,7 @@
             "https://api.asksage.ai/v1/chat/completions"
           ],
           "enumDescriptions": [
-            "Ask Sage Army - DoD Government (api.genai.army.mil) - Uses x-api-key auth and Ask Sage request format",
+            "Ask Sage Army - DoD Government (api.genai.army.mil) - Uses ANTHROPIC_AUTH_TOKEN header",
             "GenAI.mil Chat Completions - OpenAI compatible streaming API",
             "Ask Sage Chat Completions - OpenAI compatible streaming API"
           ],
@@ -99,21 +99,23 @@
         "genai-mil.model": {
           "type": "string",
           "default": "gpt-4.1-gov",
-          "description": "Model to use for completions. Use 'GenAI.mil: Select Model' to pick from the list for your endpoint."
+          "description": "Model to use for completions. Use 'GenAI.mil: Select Model' or 'Fetch Models' to pick from available models."
         },
         "genai-mil.authType": {
           "type": "string",
-          "default": "x-api-key",
+          "default": "anthropic-auth-token",
           "enum": [
             "bearer",
             "api-key",
             "x-api-key",
+            "anthropic-auth-token",
             "basic"
           ],
           "enumDescriptions": [
             "Authorization: Bearer YOUR_KEY (GenAI.mil default)",
             "api-key: YOUR_KEY",
-            "x-api-key: YOUR_KEY (Ask Sage Army default)",
+            "x-api-key: YOUR_KEY",
+            "ANTHROPIC_AUTH_TOKEN: YOUR_KEY (Ask Sage Army - api.genai.army.mil)",
             "Authorization: Basic YOUR_KEY"
           ],
           "description": "Authentication header type. Auto-set when selecting a known endpoint."
