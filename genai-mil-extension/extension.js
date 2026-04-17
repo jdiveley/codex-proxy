@@ -7,36 +7,28 @@ const fs = require('fs');
 // ═══════════════════════════════════════════════════════════════
 const KNOWN_ENDPOINTS = {
     "https://api.genai.army.mil/server/query": {
-        label: "Ask Sage - Army (api.genai.army.mil)",
+        label: "Ask Sage Army (api.genai.army.mil)",
         baseUrl: "https://api.genai.army.mil",
         defaultModel: "gpt-4.1-gov",
-        apiFormat: "asksage",           // <-- custom format flag
-        authType: "x-api-key",          // <-- uses x-api-key header
+        apiFormat: "asksage",
+        authType: "x-api-key",
         models: [
-            // GPT Models
             "gpt-4.1-gov",
             "gpt-4.1-mini-gov",
             "gpt-5.1-gov",
-            // Google Gemini
             "google-gemini-2.5-flash",
             "google-gemini-2.5-pro",
             "google-gemini-2.5-flash-image",
-            // Anthropic Claude 4.5 (4.6 excluded - broken in current API)
             "google-claude-45-sonnet",
             "google-claude-45-haiku",
             "google-claude-45-opus",
-            // AWS Nova
             "aws-bedrock-nova-pro-gov",
             "aws-bedrock-nova-micro-gov",
             "aws-bedrock-nova-lite-gov",
-            // Media models
             "google-imagen-4",
             "google-veo-3-fast"
         ],
-        // NOTE: Claude 4.6 models excluded due to API response parsing bug
-        // google-claude-46-sonnet and google-claude-46-opus cause:
-        // "Cannot read properties of undefined (reading 'name')"
-        modelsEndpoint: null            // no /models endpoint available
+        modelsEndpoint: null
     },
     "https://api.genai.mil/v1/chat/completions": {
         label: "GenAI.mil Chat Completions",
@@ -134,7 +126,6 @@ function getConfig() {
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Get effective auth type for endpoint
-// Falls back to known endpoint default, then config, then bearer
 // ═══════════════════════════════════════════════════════════════
 function getEffectiveAuthType(endpoint, configAuthType) {
     const known = KNOWN_ENDPOINTS[endpoint];
@@ -151,7 +142,6 @@ function getAuthHeaders(apiKey, authType) {
     const headers = {
         'Content-Type': 'application/json'
     };
-
     switch (authType) {
         case 'api-key':
             headers['api-key'] = apiKey;
@@ -167,7 +157,6 @@ function getAuthHeaders(apiKey, authType) {
             headers['Authorization'] = 'Bearer ' + apiKey;
             break;
     }
-
     return headers;
 }
 
@@ -176,7 +165,6 @@ function getAuthHeaders(apiKey, authType) {
 // Supports both explicit pemPath and NODE_EXTRA_CA_CERTS
 // ═══════════════════════════════════════════════════════════════
 function applyPemCert(options, pemPath) {
-    // Try explicit pemPath first
     if (pemPath) {
         try {
             options.ca = fs.readFileSync(pemPath);
@@ -185,8 +173,6 @@ function applyPemCert(options, pemPath) {
             console.warn('GenAI.mil: Could not read PEM file at ' + pemPath + ': ' + e.message);
         }
     }
-
-    // Try NODE_EXTRA_CA_CERTS environment variable
     const envPem = process.env.NODE_EXTRA_CA_CERTS;
     if (envPem) {
         try {
@@ -249,9 +235,11 @@ function httpsGet(endpoint, apiKey, authType, pemPath) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Ask Sage Army API request (non-streaming)
-// POST /server/query { message, model }
-// Returns { response: "text" }
+// HELPER: Ask Sage Army API request
+// POST /server/query
+// Body: { message: "...", model: "..." }
+// Auth: x-api-key header
+// Response: { response: "..." }
 // ═══════════════════════════════════════════════════════════════
 function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
     let url;
@@ -262,68 +250,70 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         return;
     }
 
-    // Convert messages array to a single message string
-    // Ask Sage uses { message, model } not OpenAI message array format
-    const lastUserMessage = messages
-        .filter(function (m) { return m.role === 'user'; })
-        .pop();
-
-    if (!lastUserMessage) {
-        onError(new Error('No user message found'));
-        return;
-    }
-
-    // Build conversation context from history for Ask Sage
+    // Build a single message string from the messages array
+    // Ask Sage Army uses a flat { message, model } format
     let fullMessage = '';
+
+    // Add system prompt context if present
     const systemMsg = messages.find(function (m) { return m.role === 'system'; });
     if (systemMsg) {
         fullMessage += systemMsg.content + '\n\n';
     }
 
-    // Add conversation history
-    const historyMessages = messages.filter(function (m) { return m.role !== 'system'; });
-    if (historyMessages.length > 1) {
-        // Include prior conversation as context
-        for (let i = 0; i < historyMessages.length - 1; i++) {
-            const m = historyMessages[i];
+    // Add conversation history as context, then the final user message
+    const nonSystemMessages = messages.filter(function (m) { return m.role !== 'system'; });
+
+    if (nonSystemMessages.length > 1) {
+        // Include prior turns as context
+        for (let i = 0; i < nonSystemMessages.length - 1; i++) {
+            const m = nonSystemMessages[i];
             const prefix = m.role === 'user' ? 'User: ' : 'Assistant: ';
             fullMessage += prefix + m.content + '\n\n';
         }
-        fullMessage += 'User: ' + lastUserMessage.content;
-    } else {
-        fullMessage += lastUserMessage.content;
+        // Final user message
+        const lastMsg = nonSystemMessages[nonSystemMessages.length - 1];
+        fullMessage += lastMsg.content;
+    } else if (nonSystemMessages.length === 1) {
+        fullMessage += nonSystemMessages[0].content;
     }
 
     const payload = JSON.stringify({
-        message: fullMessage,
+        message: fullMessage.trim(),
         model:   model
     });
 
-    const headers = {
-        'Content-Type':   'application/json',
-        'x-api-key':      apiKey,
-        'Content-Length': Buffer.byteLength(payload)
-    };
+    console.log('GenAI.mil: Ask Sage Army request to ' + endpoint);
+    console.log('GenAI.mil: Model: ' + model);
+    console.log('GenAI.mil: Payload length: ' + payload.length);
+    console.log('GenAI.mil: API Key length: ' + (apiKey ? apiKey.length : 0));
+    console.log('GenAI.mil: API Key preview: ' + (apiKey ? apiKey.substring(0, 8) + '...' : 'MISSING'));
 
     const options = {
         hostname: url.hostname,
         port:     url.port || 443,
         path:     url.pathname + (url.search || ''),
         method:   'POST',
-        headers:  headers
+        headers: {
+            'Content-Type':   'application/json',
+            'x-api-key':      apiKey.trim(),
+            'Content-Length': Buffer.byteLength(payload)
+        }
     };
 
     applyPemCert(options, pemPath);
 
     const req = https.request(options, function (res) {
+        console.log('GenAI.mil: Ask Sage Army response status: ' + res.statusCode);
+
         if (res.statusCode < 200 || res.statusCode >= 300) {
             let errorBody = '';
             res.on('data', function (chunk) { errorBody += chunk.toString(); });
             res.on('end', function () {
+                console.log('GenAI.mil: Error response body: ' + errorBody);
                 let errorMsg = 'HTTP ' + res.statusCode + ': ';
                 try {
                     const parsed = JSON.parse(errorBody);
-                    errorMsg += parsed.message || parsed.error || errorBody;
+                    errorMsg += parsed.message || parsed.error || parsed.detail || errorBody;
                 } catch (e) {
                     errorMsg += errorBody || res.statusMessage;
                 }
@@ -335,29 +325,38 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         let body = '';
         res.on('data', function (chunk) { body += chunk.toString(); });
         res.on('end', function () {
+            console.log('GenAI.mil: Ask Sage Army raw response: ' + body);
             try {
                 const parsed = JSON.parse(body);
 
                 // Ask Sage returns { response: "text" }
-                const responseText = parsed.response ||
-                                     parsed.message  ||
-                                     parsed.content  ||
-                                     parsed.text     ||
-                                     JSON.stringify(parsed);
+                // Also handle alternate field names just in case
+                const responseText =
+                    parsed.response  ||
+                    parsed.message   ||
+                    parsed.content   ||
+                    parsed.text      ||
+                    parsed.answer    ||
+                    parsed.output    ||
+                    JSON.stringify(parsed);
 
-                // Simulate streaming by sending full response at once
                 onData(responseText);
                 onDone();
 
             } catch (e) {
-                onError(new Error('Failed to parse Ask Sage response: ' + e.message));
+                console.log('GenAI.mil: Failed to parse response: ' + e.message);
+                onError(new Error('Failed to parse Ask Sage response: ' + e.message + ' | Raw: ' + body));
             }
         });
 
         res.on('error', function (err) { onError(err); });
     });
 
-    req.on('error', function (err) { onError(err); });
+    req.on('error', function (err) {
+        console.log('GenAI.mil: Request error: ' + err.message);
+        onError(err);
+    });
+
     req.setTimeout(120000, function () {
         req.destroy(new Error('Request timed out after 120 seconds'));
     });
@@ -379,11 +378,11 @@ function openAIStreamRequest(endpoint, apiKey, model, messages, onData, onDone, 
     }
 
     const payload = JSON.stringify({
-        model:      model,
-        messages:   messages,
-        stream:     true,
+        model:       model,
+        messages:    messages,
+        stream:      true,
         temperature: temperature,
-        max_tokens: maxTokens
+        max_tokens:  maxTokens
     });
 
     const headers = getAuthHeaders(apiKey, authType);
@@ -462,17 +461,14 @@ function openAIStreamRequest(endpoint, apiKey, model, messages, onData, onDone, 
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Unified request router
-// Automatically picks Ask Sage or OpenAI format based on endpoint
 // ═══════════════════════════════════════════════════════════════
 function sendRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
     if (isAskSageFormat(endpoint)) {
-        // Use Ask Sage Army format
         askSageRequest(
             endpoint, apiKey, model, messages,
             onData, onDone, onError, pemPath
         );
     } else {
-        // Use OpenAI streaming format
         openAIStreamRequest(
             endpoint, apiKey, model, messages,
             onData, onDone, onError,
@@ -544,7 +540,7 @@ async function editFileInWorkspace(filename, content) {
         return false;
     }
 
-    const wsUri  = vscode.workspace.workspaceFolders[0].uri;
+    const wsUri   = vscode.workspace.workspaceFolders[0].uri;
     const fileUri = vscode.Uri.joinPath(wsUri, filename);
 
     try {
@@ -634,10 +630,10 @@ function activate(context) {
 
         if (targetEndpoint === '__custom__') {
             targetEndpoint = await vscode.window.showInputBox({
-                prompt:          'Enter the endpoint URL this API key is for',
-                placeHolder:     'https://your-api.example.com/v1/chat/completions',
-                ignoreFocusOut:  true,
-                validateInput:   function (value) {
+                prompt:         'Enter the endpoint URL this API key is for',
+                placeHolder:    'https://your-api.example.com/v1/chat/completions',
+                ignoreFocusOut: true,
+                validateInput:  function (value) {
                     try { new URL(value); return null; }
                     catch (e) { return 'Please enter a valid URL'; }
                 }
@@ -719,8 +715,8 @@ function activate(context) {
                 label:       known.label,
                 description: url,
                 detail:      known.apiFormat === 'asksage'
-                                 ? '🏛️ Ask Sage Army Format | Auth: ' + known.authType
-                                 : '🔵 OpenAI Compatible | Auth: ' + known.authType,
+                    ? '🏛️ Ask Sage Army Format | Auth: ' + known.authType
+                    : '🔵 OpenAI Compatible | Auth: ' + known.authType,
                 value:       url
             });
         }
@@ -754,7 +750,6 @@ function activate(context) {
         const config = getConfig();
         await config.update('endpoint', endpointUrl);
 
-        // Auto-set auth type from known endpoint config
         const known = KNOWN_ENDPOINTS[endpointUrl];
         if (known) {
             if (known.authType) {
@@ -782,7 +777,6 @@ function activate(context) {
             }
         }
 
-        // Check for API key
         const secretName  = getApiKeySecretName(endpointUrl);
         const existingKey = await secretStorage.get(secretName);
         if (!existingKey) {
@@ -877,7 +871,7 @@ function activate(context) {
             return;
         }
 
-        // Ask Sage Army does not have a /models endpoint - show static list instead
+        // Ask Sage Army does not have a /models endpoint
         if (isAskSageFormat(config.endpoint)) {
             vscode.window.showInformationMessage(
                 'Ask Sage Army does not expose a /models endpoint. Using pre-configured model list.'
@@ -937,10 +931,10 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
         const selected = await vscode.window.showQuickPick([
-            { label: 'Bearer Token',  description: 'Authorization: Bearer YOUR_KEY (default)',   value: 'bearer'    },
-            { label: 'API Key Header', description: 'api-key: YOUR_KEY',                          value: 'api-key'   },
-            { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY (Ask Sage Army)',      value: 'x-api-key' },
-            { label: 'Basic Auth',    description: 'Authorization: Basic YOUR_KEY',               value: 'basic'     }
+            { label: 'Bearer Token',     description: 'Authorization: Bearer YOUR_KEY (default)',      value: 'bearer'    },
+            { label: 'API Key Header',   description: 'api-key: YOUR_KEY',                             value: 'api-key'   },
+            { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY (Ask Sage Army)',           value: 'x-api-key' },
+            { label: 'Basic Auth',       description: 'Authorization: Basic YOUR_KEY',                 value: 'basic'     }
         ], {
             placeHolder: 'Select authentication type'
         });
@@ -957,9 +951,9 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
         const action = await vscode.window.showQuickPick([
-            { label: '📂 Browse for PEM file',        value: 'browse' },
-            { label: '🌐 Use NODE_EXTRA_CA_CERTS env', value: 'env'    },
-            { label: '🗑️ Clear PEM certificate',       value: 'clear'  }
+            { label: '📂 Browse for PEM file',         value: 'browse' },
+            { label: '🌐 Use NODE_EXTRA_CA_CERTS env',  value: 'env'    },
+            { label: '🗑️ Clear PEM certificate',        value: 'clear'  }
         ], {
             placeHolder: 'Set or clear PEM certificate'
         });
@@ -985,7 +979,7 @@ function activate(context) {
                 );
             } else {
                 vscode.window.showWarningMessage(
-                    'NODE_EXTRA_CA_CERTS is not set as a system environment variable. ' +
+                    'NODE_EXTRA_CA_CERTS is not set. ' +
                     'Set it in Windows User Environment Variables and restart VSCode.'
                 );
             }
@@ -1033,7 +1027,7 @@ function activate(context) {
         const info = [
             '═══ GenAI.mil Extension Settings ═══',
             'Endpoint:    ' + (config.endpoint || 'Not set'),
-            'Format:      ' + (known ? known.apiFormat.toUpperCase() : 'Unknown'),
+            'Format:      ' + (known ? known.apiFormat.toUpperCase() : 'Unknown/Custom'),
             'Model:       ' + (config.model    || 'Not set'),
             'Auth Type:   ' + authType,
             'Temperature: ' + config.temperature,
@@ -1043,9 +1037,9 @@ function activate(context) {
             'API Key (' + hostname + '): ' + (apiKey
                 ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)'
                 : 'Not set'),
-            'Key Storage: OS Credential Manager (encrypted)',
-            'PEM Cert:    ' + (config.pemPath || 'Not set'),
-            'NODE_EXTRA_CA_CERTS: ' + (envPem  || 'Not set')
+            'Key Storage:         OS Credential Manager (encrypted)',
+            'PEM Cert:            ' + (config.pemPath || 'Not set'),
+            'NODE_EXTRA_CA_CERTS: ' + (envPem || 'Not set')
         ].join('\n');
 
         vscode.window.showInformationMessage(info, { modal: true });
@@ -1065,8 +1059,9 @@ function activate(context) {
             'GenAI.mil Chat',
             vscode.ViewColumn.One,
             {
-                enableScripts:          true,
-                retainContextWhenHidden: true
+                enableScripts:           true,
+                retainContextWhenHidden: true,
+                localResourceRoots:      []
             }
         );
 
@@ -1117,7 +1112,7 @@ function activate(context) {
             if (message.command === 'send') {
                 if (!apiKey) {
                     vscode.window.showErrorMessage(
-                        'No API key found. Run "GenAI.mil: Set API Key" first.'
+                        'No API key found for this endpoint. Run "GenAI.mil: Set API Key" first.'
                     );
                     return;
                 }
@@ -1151,7 +1146,7 @@ function activate(context) {
                         refreshWebview(false);
                     },
                     function (error) {
-                        chatHistory.push({ role: 'assistant', content: 'Error: ' + error.message });
+                        chatHistory.push({ role: 'assistant', content: '❌ Error: ' + error.message });
                         refreshWebview(false);
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
@@ -1208,6 +1203,25 @@ function activate(context) {
                     vscode.window.showInformationMessage('Chat saved to ' + saveUri.fsPath);
                 }
             }
+
+            // ─────────────────────────────────────────────
+            // DEBUG COMMAND: Show API key info in console
+            // ─────────────────────────────────────────────
+            if (message.command === 'debugApiKey') {
+                const debugKey = await secretStorage.get(getApiKeySecretName(config.endpoint));
+                console.log('GenAI.mil DEBUG:');
+                console.log('  Endpoint:      ' + config.endpoint);
+                console.log('  Model:         ' + config.model);
+                console.log('  Auth Type:     ' + authType);
+                console.log('  API Key set:   ' + (debugKey ? 'YES' : 'NO'));
+                console.log('  API Key len:   ' + (debugKey ? debugKey.length : 0));
+                console.log('  API Key start: ' + (debugKey ? debugKey.substring(0, 8) + '...' : 'N/A'));
+                console.log('  PEM Path:      ' + config.pemPath);
+                console.log('  NODE_EXTRA_CA: ' + (process.env.NODE_EXTRA_CA_CERTS || 'Not set'));
+                vscode.window.showInformationMessage(
+                    'Debug info logged to console (Help > Toggle Developer Tools > Console)'
+                );
+            }
         });
     });
 
@@ -1237,7 +1251,7 @@ function activate(context) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBVIEW HTML - unchanged from your original
+// WEBVIEW HTML
 // ═══════════════════════════════════════════════════════════════
 function getWebviewContent(chatHistory, loading, config) {
     let chatHtml = '';
@@ -1251,6 +1265,7 @@ function getWebviewContent(chatHistory, loading, config) {
 
         let content = escapeHtml(msg.content);
 
+        // Parse code blocks with filename
         content = content.replace(
             /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
             function (match, lang, filename, code) {
@@ -1268,6 +1283,7 @@ function getWebviewContent(chatHistory, loading, config) {
             }
         );
 
+        // Parse regular code blocks
         content = content.replace(
             /```(\w*)\n([\s\S]*?)```/g,
             function (match, lang, code) {
@@ -1282,7 +1298,10 @@ function getWebviewContent(chatHistory, loading, config) {
             }
         );
 
+        // Inline code
         content = content.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
+
+        // Newlines
         content = content.replace(/\n/g, '<br>');
 
         chatHtml += '<div class="' + msgClass + '">' +
@@ -1297,46 +1316,87 @@ function getWebviewContent(chatHistory, loading, config) {
     const known          = KNOWN_ENDPOINTS[config.endpoint];
     const statusEndpoint = known ? known.label : (config.endpoint || 'Not set');
     const statusModel    = config.model    || 'Not set';
-    const statusFormat   = known ? (known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army' : '🔵 OpenAI') : '❓ Unknown';
-    const envPem         = process.env.NODE_EXTRA_CA_CERTS ? '✅' : '⚠️';
+    const statusFormat   = known
+        ? (known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army' : '🔵 OpenAI')
+        : '❓ Custom';
+    const certStatus     = process.env.NODE_EXTRA_CA_CERTS
+        ? '🔒 DoD Cert ✅'
+        : (config.pemPath ? '🔒 PEM Set ✅' : '⚠️ No Cert');
 
     return '<!DOCTYPE html>' +
-        '<html lang="en"><head><style>' +
-        'body{font-family:var(--vscode-font-family,"Segoe UI",Arial,sans-serif);font-size:var(--vscode-font-size,13px);margin:0;padding:0;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-editor-foreground,#cccccc);}' +
+        '<html lang="en"><head><meta charset="UTF-8"><style>' +
+        'body{font-family:var(--vscode-font-family,"Segoe UI",Arial,sans-serif);' +
+        'font-size:var(--vscode-font-size,13px);margin:0;padding:0;' +
+        'background:var(--vscode-editor-background,#1e1e1e);' +
+        'color:var(--vscode-editor-foreground,#cccccc);}' +
         '.container{display:flex;flex-direction:column;height:100vh;padding:12px;box-sizing:border-box;}' +
         'h2{margin:0 0 4px 0;color:var(--vscode-textLink-foreground,#3794ff);font-size:16px;}' +
-        '.status-bar{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin-bottom:8px;padding:6px 8px;background:var(--vscode-sideBar-background,#252526);border:1px solid var(--vscode-widget-border,#454545);border-radius:4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;}' +
+        '.status-bar{font-size:11px;color:var(--vscode-descriptionForeground,#999);' +
+        'margin-bottom:8px;padding:6px 8px;' +
+        'background:var(--vscode-sideBar-background,#252526);' +
+        'border:1px solid var(--vscode-widget-border,#454545);border-radius:4px;' +
+        'display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;}' +
         '.status-info{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}' +
         '.status-actions{display:flex;gap:4px;flex-wrap:wrap;}' +
-        '.status-btn{padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:3px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.status-btn{padding:2px 8px;font-size:11px;cursor:pointer;' +
+        'border:1px solid var(--vscode-button-border,#454545);border-radius:3px;' +
+        'background:var(--vscode-button-secondaryBackground,#3a3d41);' +
+        'color:var(--vscode-button-secondaryForeground,#cccccc);}' +
         '.status-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
         '.toolbar{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;}' +
-        '.toolbar button{padding:4px 10px;font-size:12px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:4px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.toolbar button{padding:4px 10px;font-size:12px;cursor:pointer;' +
+        'border:1px solid var(--vscode-button-border,#454545);border-radius:4px;' +
+        'background:var(--vscode-button-secondaryBackground,#3a3d41);' +
+        'color:var(--vscode-button-secondaryForeground,#cccccc);}' +
         '.toolbar button:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
-        '#chat{flex:1;overflow-y:auto;border:1px solid var(--vscode-widget-border,#454545);border-radius:6px;padding:10px;background:var(--vscode-editor-background,#1e1e1e);margin-bottom:8px;}' +
+        '#chat{flex:1;overflow-y:auto;' +
+        'border:1px solid var(--vscode-widget-border,#454545);border-radius:6px;' +
+        'padding:10px;background:var(--vscode-editor-background,#1e1e1e);margin-bottom:8px;}' +
         '.message{margin-bottom:10px;padding:10px;border-radius:6px;word-wrap:break-word;}' +
-        '.user-message{background:var(--vscode-textBlockQuote-background,#2a2d2e);border-left:4px solid var(--vscode-textLink-foreground,#3794ff);}' +
-        '.ai-message{background:var(--vscode-editor-inactiveSelectionBackground,#3a3d41);border-left:4px solid var(--vscode-terminal-ansiGreen,#4caf50);}' +
-        '.loading{background:var(--vscode-inputValidation-warningBackground,#352a05)!important;border-left:4px solid var(--vscode-inputValidation-warningBorder,#ff9800)!important;}' +
-        '.code-block{background:var(--vscode-textCodeBlock-background,#0a0a0a);color:var(--vscode-editor-foreground,#d4d4d4);border-radius:6px;margin:8px 0;overflow:hidden;border:1px solid var(--vscode-widget-border,#454545);}' +
-        '.code-header{background:var(--vscode-editorGroupHeader-tabsBackground,#252526);color:var(--vscode-foreground,#cccccc);padding:6px 10px;display:flex;align-items:center;justify-content:space-between;font-size:12px;flex-wrap:wrap;gap:6px;}' +
+        '.user-message{background:var(--vscode-textBlockQuote-background,#2a2d2e);' +
+        'border-left:4px solid var(--vscode-textLink-foreground,#3794ff);}' +
+        '.ai-message{background:var(--vscode-editor-inactiveSelectionBackground,#3a3d41);' +
+        'border-left:4px solid var(--vscode-terminal-ansiGreen,#4caf50);}' +
+        '.loading{background:var(--vscode-inputValidation-warningBackground,#352a05)!important;' +
+        'border-left:4px solid var(--vscode-inputValidation-warningBorder,#ff9800)!important;}' +
+        '.code-block{background:var(--vscode-textCodeBlock-background,#0a0a0a);' +
+        'color:var(--vscode-editor-foreground,#d4d4d4);border-radius:6px;margin:8px 0;' +
+        'overflow:hidden;border:1px solid var(--vscode-widget-border,#454545);}' +
+        '.code-header{background:var(--vscode-editorGroupHeader-tabsBackground,#252526);' +
+        'color:var(--vscode-foreground,#cccccc);padding:6px 10px;' +
+        'display:flex;align-items:center;justify-content:space-between;font-size:12px;' +
+        'flex-wrap:wrap;gap:6px;}' +
         '.code-actions{display:flex;gap:4px;flex-wrap:wrap;}' +
-        '.code-btn{padding:3px 8px;font-size:11px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:3px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.code-btn{padding:3px 8px;font-size:11px;cursor:pointer;' +
+        'border:1px solid var(--vscode-button-border,#454545);border-radius:3px;' +
+        'background:var(--vscode-button-secondaryBackground,#3a3d41);' +
+        'color:var(--vscode-button-secondaryForeground,#cccccc);}' +
         '.code-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
         'pre{margin:0;padding:12px;overflow-x:auto;font-size:13px;}' +
-        'code{font-family:var(--vscode-editor-font-family,"Consolas","Courier New",monospace);font-size:var(--vscode-editor-font-size,13px);}' +
-        '.inline-code{background:var(--vscode-textCodeBlock-background,#0a0a0a);padding:2px 5px;border-radius:3px;font-size:13px;}' +
+        'code{font-family:var(--vscode-editor-font-family,"Consolas","Courier New",monospace);' +
+        'font-size:var(--vscode-editor-font-size,13px);}' +
+        '.inline-code{background:var(--vscode-textCodeBlock-background,#0a0a0a);' +
+        'padding:2px 5px;border-radius:3px;font-size:13px;}' +
         '#form{display:flex;gap:8px;}' +
-        '#input{flex:1;padding:10px;font-size:14px;border:1px solid var(--vscode-input-border,#454545);border-radius:6px;outline:none;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#cccccc);}' +
+        '#input{flex:1;padding:10px;font-size:14px;' +
+        'border:1px solid var(--vscode-input-border,#454545);border-radius:6px;outline:none;' +
+        'background:var(--vscode-input-background,#3c3c3c);' +
+        'color:var(--vscode-input-foreground,#cccccc);}' +
         '#input:focus{border-color:var(--vscode-focusBorder,#007fd4);}' +
         '#input::placeholder{color:var(--vscode-input-placeholderForeground,#999);}' +
-        '#form button{padding:10px 20px;font-size:14px;cursor:pointer;border:none;border-radius:6px;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#ffffff);}' +
+        '#form button{padding:10px 20px;font-size:14px;cursor:pointer;' +
+        'border:none;border-radius:6px;' +
+        'background:var(--vscode-button-background,#0e639c);' +
+        'color:var(--vscode-button-foreground,#ffffff);}' +
         '#form button:hover{background:var(--vscode-button-hoverBackground,#1177bb);}' +
-        '.empty-state{color:var(--vscode-descriptionForeground,#999);text-align:center;padding:40px;font-size:14px;}' +
+        '.empty-state{color:var(--vscode-descriptionForeground,#999);' +
+        'text-align:center;padding:40px;font-size:14px;}' +
         '#chat::-webkit-scrollbar{width:10px;}' +
         '#chat::-webkit-scrollbar-track{background:transparent;}' +
-        '#chat::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background,#79797966);border-radius:5px;}' +
-        '#chat::-webkit-scrollbar-thumb:hover{background:var(--vscode-scrollbarSlider-hoverBackground,#646464b3);}' +
+        '#chat::-webkit-scrollbar-thumb{' +
+        'background:var(--vscode-scrollbarSlider-background,#79797966);border-radius:5px;}' +
+        '#chat::-webkit-scrollbar-thumb:hover{' +
+        'background:var(--vscode-scrollbarSlider-hoverBackground,#646464b3);}' +
         '</style></head><body>' +
         '<div class="container">' +
         '<h2>🤖 GenAI.mil Chat</h2>' +
@@ -1345,7 +1405,7 @@ function getWebviewContent(chatHistory, loading, config) {
         '<span>🌐 ' + escapeHtml(statusEndpoint) + '</span>' +
         '<span>🤖 ' + escapeHtml(statusModel) + '</span>' +
         '<span>' + statusFormat + '</span>' +
-        '<span>🔒 DoD Cert: ' + envPem + '</span>' +
+        '<span>' + certStatus + '</span>' +
         '</div>' +
         '<div class="status-actions">' +
         '<button class="status-btn" id="changeModelBtn">Change Model</button>' +
@@ -1355,9 +1415,11 @@ function getWebviewContent(chatHistory, loading, config) {
         '<div class="toolbar">' +
         '<button id="saveChatBtn">💾 Save Chat</button>' +
         '<button id="clearChatBtn">🗑️ Clear Chat</button>' +
+        '<button id="debugBtn">🔍 Debug API Key</button>' +
         '</div>' +
         '<div id="chat">' +
-        (chatHtml || '<div class="empty-state">Start a conversation...<br><br>' +
+        (chatHtml || '<div class="empty-state">' +
+            'Start a conversation...<br><br>' +
             '🏛️ <b>Ask Sage Army</b>: api.genai.army.mil<br>' +
             '🔵 <b>GenAI.mil</b>: api.genai.mil<br><br>' +
             'Try: "Create a Python script called hello.py that prints Hello World"<br><br>' +
@@ -1366,37 +1428,71 @@ function getWebviewContent(chatHistory, loading, config) {
             '</div>') +
         '</div>' +
         '<form id="form">' +
-        '<input id="input" type="text" placeholder="Ask me to write code, create files, or answer questions..." autofocus />' +
+        '<input id="input" type="text" ' +
+        'placeholder="Ask me to write code, create files, or answer questions..." />' +
         '<button type="submit">Send</button>' +
         '</form></div>' +
         '<script>' +
         'var vscode=acquireVsCodeApi();' +
+
+        // Form submit
         'document.getElementById("form").addEventListener("submit",function(e){' +
-        'e.preventDefault();var text=document.getElementById("input").value;' +
-        'if(text.trim()){vscode.postMessage({command:"send",text:text});document.getElementById("input").value="";}' +
-        '});' +
-        'document.getElementById("saveChatBtn").addEventListener("click",function(){vscode.postMessage({command:"saveChat"});});' +
-        'document.getElementById("clearChatBtn").addEventListener("click",function(){vscode.postMessage({command:"clearChat"});});' +
-        'document.getElementById("changeModelBtn").addEventListener("click",function(){vscode.postMessage({command:"changeModel"});});' +
-        'document.getElementById("fetchModelsBtn").addEventListener("click",function(){vscode.postMessage({command:"fetchModels"});});' +
-        'document.getElementById("changeEndpointBtn").addEventListener("click",function(){vscode.postMessage({command:"changeEndpoint"});});' +
+        'e.preventDefault();' +
+        'var text=document.getElementById("input").value;' +
+        'if(text.trim()){' +
+        'vscode.postMessage({command:"send",text:text});' +
+        'document.getElementById("input").value="";' +
+        '}});' +
+
+        // Toolbar buttons
+        'document.getElementById("saveChatBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"saveChat"});});' +
+        'document.getElementById("clearChatBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"clearChat"});});' +
+        'document.getElementById("debugBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"debugApiKey"});});' +
+
+        // Status bar buttons
+        'document.getElementById("changeModelBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"changeModel"});});' +
+        'document.getElementById("fetchModelsBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"fetchModels"});});' +
+        'document.getElementById("changeEndpointBtn").addEventListener("click",function(){' +
+        'vscode.postMessage({command:"changeEndpoint"});});' +
+
+        // Code block buttons
         'document.getElementById("chat").addEventListener("click",function(e){' +
         'var btn=e.target.closest(".code-btn");if(!btn)return;' +
-        'var codeBlock=btn.closest(".code-block");var codeEl=codeBlock.querySelector("code");' +
-        'var code=codeEl.textContent;var action=btn.getAttribute("data-action");var filename=btn.getAttribute("data-filename");' +
+        'var codeBlock=btn.closest(".code-block");' +
+        'var codeEl=codeBlock.querySelector("code");' +
+        'var code=codeEl.textContent;' +
+        'var action=btn.getAttribute("data-action");' +
+        'var filename=btn.getAttribute("data-filename");' +
         'if(action==="create"){vscode.postMessage({command:"createFile",filename:filename,content:code});}' +
         'else if(action==="edit"){vscode.postMessage({command:"editFile",filename:filename,content:code});}' +
         'else if(action==="insert"){vscode.postMessage({command:"insertAtCursor",content:code});}' +
         '});' +
+
+        // Streaming message handler
         'window.addEventListener("message",function(event){' +
         'var message=event.data;' +
         'if(message.command==="stream"){' +
         'var chatDiv=document.getElementById("chat");' +
         'var lastMsg=chatDiv.querySelector(".message:last-child");' +
         'if(lastMsg&&lastMsg.classList.contains("loading")){' +
-        'lastMsg.innerHTML="<b>🤖 GenAI:</b><br>"+message.text.replace(/\\n/g,"<br>");}' +
+        'lastMsg.innerHTML="<b>🤖 GenAI:</b><br>"+message.text.replace(/\\n/g,"<br>");' +
+        'chatDiv.scrollTop=chatDiv.scrollHeight;' +
+        '}' +
         '}});' +
-        'var chatDiv=document.getElementById("chat");chatDiv.scrollTop=chatDiv.scrollHeight;' +
+
+        // Scroll to bottom and focus input
+        'var chatDiv=document.getElementById("chat");' +
+        'chatDiv.scrollTop=chatDiv.scrollHeight;' +
+        'setTimeout(function(){' +
+        'var inp=document.getElementById("input");' +
+        'if(inp){inp.focus();}' +
+        '},100);' +
+
         '</script></body></html>';
 }
 
