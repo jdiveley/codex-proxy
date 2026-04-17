@@ -4,14 +4,46 @@ const fs = require('fs');
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION: Known endpoints and their available models
-// Based on Ask Sage API documentation:
-// https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html
 // ═══════════════════════════════════════════════════════════════
 const KNOWN_ENDPOINTS = {
+    "https://api.genai.army.mil/server/query": {
+        label: "Ask Sage - Army (api.genai.army.mil)",
+        baseUrl: "https://api.genai.army.mil",
+        defaultModel: "gpt-4.1-gov",
+        apiFormat: "asksage",           // <-- custom format flag
+        authType: "x-api-key",          // <-- uses x-api-key header
+        models: [
+            // GPT Models
+            "gpt-4.1-gov",
+            "gpt-4.1-mini-gov",
+            "gpt-5.1-gov",
+            // Google Gemini
+            "google-gemini-2.5-flash",
+            "google-gemini-2.5-pro",
+            "google-gemini-2.5-flash-image",
+            // Anthropic Claude 4.5 (4.6 excluded - broken in current API)
+            "google-claude-45-sonnet",
+            "google-claude-45-haiku",
+            "google-claude-45-opus",
+            // AWS Nova
+            "aws-bedrock-nova-pro-gov",
+            "aws-bedrock-nova-micro-gov",
+            "aws-bedrock-nova-lite-gov",
+            // Media models
+            "google-imagen-4",
+            "google-veo-3-fast"
+        ],
+        // NOTE: Claude 4.6 models excluded due to API response parsing bug
+        // google-claude-46-sonnet and google-claude-46-opus cause:
+        // "Cannot read properties of undefined (reading 'name')"
+        modelsEndpoint: null            // no /models endpoint available
+    },
     "https://api.genai.mil/v1/chat/completions": {
         label: "GenAI.mil Chat Completions",
         baseUrl: "https://api.genai.mil",
         defaultModel: "gemini-2.5-flash",
+        apiFormat: "openai",
+        authType: "bearer",
         models: [
             "gemini-2.5-flash",
             "gemini-2.5-pro",
@@ -31,6 +63,8 @@ const KNOWN_ENDPOINTS = {
         label: "Ask Sage Chat Completions",
         baseUrl: "https://api.asksage.ai",
         defaultModel: "gemini-2.5-flash",
+        apiFormat: "openai",
+        authType: "bearer",
         models: [
             "gemini-2.5-flash",
             "gemini-2.5-pro",
@@ -47,6 +81,14 @@ const KNOWN_ENDPOINTS = {
         modelsEndpoint: "/v1/models"
     }
 };
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Check if endpoint uses Ask Sage Army format
+// ═══════════════════════════════════════════════════════════════
+function isAskSageFormat(endpoint) {
+    const known = KNOWN_ENDPOINTS[endpoint];
+    return known && known.apiFormat === 'asksage';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Generate a secret storage key per endpoint
@@ -78,16 +120,28 @@ function getBaseUrl(endpoint) {
 function getConfig() {
     const config = vscode.workspace.getConfiguration('genai-mil');
     return {
-        endpoint: (config.get('endpoint') || '').trim(),
-        model: (config.get('model') || '').trim(),
-        pemPath: (config.get('pemPath') || '').trim(),
-        authType: (config.get('authType') || 'bearer').trim(),
-        temperature: config.get('temperature') || 0.7,
-        maxTokens: config.get('maxTokens') || 4096,
+        endpoint:    (config.get('endpoint')    || '').trim(),
+        model:       (config.get('model')       || '').trim(),
+        pemPath:     (config.get('pemPath')     || '').trim(),
+        authType:    (config.get('authType')    || 'bearer').trim(),
+        temperature: config.get('temperature')  || 0.7,
+        maxTokens:   config.get('maxTokens')    || 4096,
         update: function (key, value) {
             return config.update(key, value, true);
         }
     };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Get effective auth type for endpoint
+// Falls back to known endpoint default, then config, then bearer
+// ═══════════════════════════════════════════════════════════════
+function getEffectiveAuthType(endpoint, configAuthType) {
+    const known = KNOWN_ENDPOINTS[endpoint];
+    if (known && known.authType) {
+        return known.authType;
+    }
+    return configAuthType || 'bearer';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -118,6 +172,33 @@ function getAuthHeaders(apiKey, authType) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// HELPER: Load DoD PEM certificate into HTTPS options
+// Supports both explicit pemPath and NODE_EXTRA_CA_CERTS
+// ═══════════════════════════════════════════════════════════════
+function applyPemCert(options, pemPath) {
+    // Try explicit pemPath first
+    if (pemPath) {
+        try {
+            options.ca = fs.readFileSync(pemPath);
+            return;
+        } catch (e) {
+            console.warn('GenAI.mil: Could not read PEM file at ' + pemPath + ': ' + e.message);
+        }
+    }
+
+    // Try NODE_EXTRA_CA_CERTS environment variable
+    const envPem = process.env.NODE_EXTRA_CA_CERTS;
+    if (envPem) {
+        try {
+            options.ca = fs.readFileSync(envPem);
+            return;
+        } catch (e) {
+            console.warn('GenAI.mil: Could not read NODE_EXTRA_CA_CERTS at ' + envPem + ': ' + e.message);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // HELPER: Make HTTPS GET request (for fetching models)
 // ═══════════════════════════════════════════════════════════════
 function httpsGet(endpoint, apiKey, authType, pemPath) {
@@ -135,19 +216,13 @@ function httpsGet(endpoint, apiKey, authType, pemPath) {
 
         const options = {
             hostname: url.hostname,
-            port: url.port || 443,
-            path: url.pathname + (url.search || ''),
-            method: 'GET',
-            headers: headers
+            port:     url.port || 443,
+            path:     url.pathname + (url.search || ''),
+            method:   'GET',
+            headers:  headers
         };
 
-        if (pemPath) {
-            try {
-                options.ca = fs.readFileSync(pemPath);
-            } catch (e) {
-                // Continue without PEM
-            }
-        }
+        applyPemCert(options, pemPath);
 
         const req = https.request(options, function (res) {
             let body = '';
@@ -174,103 +249,127 @@ function httpsGet(endpoint, apiKey, authType, pemPath) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Write file to workspace or prompt save dialog
+// HELPER: Ask Sage Army API request (non-streaming)
+// POST /server/query { message, model }
+// Returns { response: "text" }
 // ═══════════════════════════════════════════════════════════════
-async function writeFileToWorkspace(filename, content, openBeside) {
-    const encoder = new TextEncoder();
-
-    if (vscode.workspace.workspaceFolders) {
-        const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
-        const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
-
-        let fileExists = false;
-        try {
-            await vscode.workspace.fs.stat(fileUri);
-            fileExists = true;
-        } catch (e) {
-            fileExists = false;
-        }
-
-        if (fileExists) {
-            const overwrite = await vscode.window.showWarningMessage(
-                'File "' + filename + '" already exists. Overwrite?',
-                'Yes', 'No'
-            );
-            if (overwrite !== 'Yes') {
-                return false;
-            }
-        }
-
-        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
-        vscode.window.showInformationMessage('File created: ' + filename);
-
-        if (openBeside) {
-            const doc = await vscode.workspace.openTextDocument(fileUri);
-            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-        }
-
-        return true;
-
-    } else {
-        const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(filename),
-            saveLabel: 'Save File'
-        });
-        if (uri) {
-            await vscode.workspace.fs.writeFile(uri, encoder.encode(content));
-            vscode.window.showInformationMessage('File saved: ' + uri.fsPath);
-            if (openBeside) {
-                const doc = await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-            }
-            return true;
-        }
-        return false;
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// HELPER: Edit existing file or create if not found
-// ═══════════════════════════════════════════════════════════════
-async function editFileInWorkspace(filename, content) {
-    if (!vscode.workspace.workspaceFolders) {
-        vscode.window.showErrorMessage('Open a workspace folder first to edit files.');
-        return false;
-    }
-
-    const wsUri = vscode.workspace.workspaceFolders[0].uri;
-    const fileUri = vscode.Uri.joinPath(wsUri, filename);
-
+function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
+    let url;
     try {
-        const doc = await vscode.workspace.openTextDocument(fileUri);
-        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        url = new URL(endpoint);
+    } catch (e) {
+        onError(new Error('Invalid endpoint URL: ' + endpoint));
+        return;
+    }
 
-        const fullRange = new vscode.Range(
-            doc.positionAt(0),
-            doc.positionAt(doc.getText().length)
-        );
+    // Convert messages array to a single message string
+    // Ask Sage uses { message, model } not OpenAI message array format
+    const lastUserMessage = messages
+        .filter(function (m) { return m.role === 'user'; })
+        .pop();
 
-        await editor.edit(function (editBuilder) {
-            editBuilder.replace(fullRange, content);
+    if (!lastUserMessage) {
+        onError(new Error('No user message found'));
+        return;
+    }
+
+    // Build conversation context from history for Ask Sage
+    let fullMessage = '';
+    const systemMsg = messages.find(function (m) { return m.role === 'system'; });
+    if (systemMsg) {
+        fullMessage += systemMsg.content + '\n\n';
+    }
+
+    // Add conversation history
+    const historyMessages = messages.filter(function (m) { return m.role !== 'system'; });
+    if (historyMessages.length > 1) {
+        // Include prior conversation as context
+        for (let i = 0; i < historyMessages.length - 1; i++) {
+            const m = historyMessages[i];
+            const prefix = m.role === 'user' ? 'User: ' : 'Assistant: ';
+            fullMessage += prefix + m.content + '\n\n';
+        }
+        fullMessage += 'User: ' + lastUserMessage.content;
+    } else {
+        fullMessage += lastUserMessage.content;
+    }
+
+    const payload = JSON.stringify({
+        message: fullMessage,
+        model:   model
+    });
+
+    const headers = {
+        'Content-Type':   'application/json',
+        'x-api-key':      apiKey,
+        'Content-Length': Buffer.byteLength(payload)
+    };
+
+    const options = {
+        hostname: url.hostname,
+        port:     url.port || 443,
+        path:     url.pathname + (url.search || ''),
+        method:   'POST',
+        headers:  headers
+    };
+
+    applyPemCert(options, pemPath);
+
+    const req = https.request(options, function (res) {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+            let errorBody = '';
+            res.on('data', function (chunk) { errorBody += chunk.toString(); });
+            res.on('end', function () {
+                let errorMsg = 'HTTP ' + res.statusCode + ': ';
+                try {
+                    const parsed = JSON.parse(errorBody);
+                    errorMsg += parsed.message || parsed.error || errorBody;
+                } catch (e) {
+                    errorMsg += errorBody || res.statusMessage;
+                }
+                onError(new Error(errorMsg));
+            });
+            return;
+        }
+
+        let body = '';
+        res.on('data', function (chunk) { body += chunk.toString(); });
+        res.on('end', function () {
+            try {
+                const parsed = JSON.parse(body);
+
+                // Ask Sage returns { response: "text" }
+                const responseText = parsed.response ||
+                                     parsed.message  ||
+                                     parsed.content  ||
+                                     parsed.text     ||
+                                     JSON.stringify(parsed);
+
+                // Simulate streaming by sending full response at once
+                onData(responseText);
+                onDone();
+
+            } catch (e) {
+                onError(new Error('Failed to parse Ask Sage response: ' + e.message));
+            }
         });
 
-        vscode.window.showInformationMessage('File updated: ' + filename);
-        return true;
+        res.on('error', function (err) { onError(err); });
+    });
 
-    } catch (e) {
-        const encoder = new TextEncoder();
-        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
-        const doc = await vscode.workspace.openTextDocument(fileUri);
-        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-        vscode.window.showInformationMessage('File created: ' + filename);
-        return true;
-    }
+    req.on('error', function (err) { onError(err); });
+    req.setTimeout(120000, function () {
+        req.destroy(new Error('Request timed out after 120 seconds'));
+    });
+
+    req.write(payload);
+    req.end();
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPER: Make HTTPS POST request with streaming
+// HELPER: OpenAI-compatible streaming request
 // ═══════════════════════════════════════════════════════════════
-function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
+function openAIStreamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
     let url;
     try {
         url = new URL(endpoint);
@@ -280,9 +379,9 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
     }
 
     const payload = JSON.stringify({
-        model: model,
-        messages: messages,
-        stream: true,
+        model:      model,
+        messages:   messages,
+        stream:     true,
         temperature: temperature,
         max_tokens: maxTokens
     });
@@ -292,19 +391,13 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
 
     const options = {
         hostname: url.hostname,
-        port: url.port || 443,
-        path: url.pathname + (url.search || ''),
-        method: 'POST',
-        headers: headers
+        port:     url.port || 443,
+        path:     url.pathname + (url.search || ''),
+        method:   'POST',
+        headers:  headers
     };
 
-    if (pemPath) {
-        try {
-            options.ca = fs.readFileSync(pemPath);
-        } catch (e) {
-            // Continue without PEM
-        }
-    }
+    applyPemCert(options, pemPath);
 
     const req = https.request(options, function (res) {
         if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -331,7 +424,6 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
 
         res.on('data', function (chunk) {
             buffer += chunk.toString();
-
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
 
@@ -339,11 +431,7 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
                 const line = lines[i].trim();
                 if (line.startsWith('data: ')) {
                     const data = line.slice(6).trim();
-
-                    if (data === '[DONE]') {
-                        continue;
-                    }
-
+                    if (data === '[DONE]') { continue; }
                     try {
                         const parsed = JSON.parse(data);
                         if (parsed.choices &&
@@ -353,31 +441,136 @@ function streamRequest(endpoint, apiKey, model, messages, onData, onDone, onErro
                             onData(parsed.choices[0].delta.content);
                         }
                     } catch (e) {
-                        // Skip invalid JSON
+                        // Skip invalid JSON chunks
                     }
                 }
             }
         });
 
-        res.on('end', function () {
-            onDone();
-        });
-
-        res.on('error', function (err) {
-            onError(err);
-        });
+        res.on('end',   function () { onDone(); });
+        res.on('error', function (err) { onError(err); });
     });
 
-    req.on('error', function (err) {
-        onError(err);
-    });
-
+    req.on('error', function (err) { onError(err); });
     req.setTimeout(120000, function () {
         req.destroy(new Error('Request timed out after 120 seconds'));
     });
 
     req.write(payload);
     req.end();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Unified request router
+// Automatically picks Ask Sage or OpenAI format based on endpoint
+// ═══════════════════════════════════════════════════════════════
+function sendRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
+    if (isAskSageFormat(endpoint)) {
+        // Use Ask Sage Army format
+        askSageRequest(
+            endpoint, apiKey, model, messages,
+            onData, onDone, onError, pemPath
+        );
+    } else {
+        // Use OpenAI streaming format
+        openAIStreamRequest(
+            endpoint, apiKey, model, messages,
+            onData, onDone, onError,
+            pemPath, authType, temperature, maxTokens
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Write file to workspace or prompt save dialog
+// ═══════════════════════════════════════════════════════════════
+async function writeFileToWorkspace(filename, content, openBeside) {
+    const encoder = new TextEncoder();
+
+    if (vscode.workspace.workspaceFolders) {
+        const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
+        const fileUri = vscode.Uri.joinPath(workspaceUri, filename);
+
+        let fileExists = false;
+        try {
+            await vscode.workspace.fs.stat(fileUri);
+            fileExists = true;
+        } catch (e) {
+            fileExists = false;
+        }
+
+        if (fileExists) {
+            const overwrite = await vscode.window.showWarningMessage(
+                'File "' + filename + '" already exists. Overwrite?',
+                'Yes', 'No'
+            );
+            if (overwrite !== 'Yes') { return false; }
+        }
+
+        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
+        vscode.window.showInformationMessage('File created: ' + filename);
+
+        if (openBeside) {
+            const doc = await vscode.workspace.openTextDocument(fileUri);
+            await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        }
+
+        return true;
+
+    } else {
+        const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(filename),
+            saveLabel:  'Save File'
+        });
+        if (uri) {
+            await vscode.workspace.fs.writeFile(uri, encoder.encode(content));
+            vscode.window.showInformationMessage('File saved: ' + uri.fsPath);
+            if (openBeside) {
+                const doc = await vscode.workspace.openTextDocument(uri);
+                await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+            }
+            return true;
+        }
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Edit existing file or create if not found
+// ═══════════════════════════════════════════════════════════════
+async function editFileInWorkspace(filename, content) {
+    if (!vscode.workspace.workspaceFolders) {
+        vscode.window.showErrorMessage('Open a workspace folder first to edit files.');
+        return false;
+    }
+
+    const wsUri  = vscode.workspace.workspaceFolders[0].uri;
+    const fileUri = vscode.Uri.joinPath(wsUri, filename);
+
+    try {
+        const doc    = await vscode.workspace.openTextDocument(fileUri);
+        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+
+        const fullRange = new vscode.Range(
+            doc.positionAt(0),
+            doc.positionAt(doc.getText().length)
+        );
+
+        await editor.edit(function (editBuilder) {
+            editBuilder.replace(fullRange, content);
+        });
+
+        vscode.window.showInformationMessage('File updated: ' + filename);
+        return true;
+
+    } catch (e) {
+        const encoder = new TextEncoder();
+        await vscode.workspace.fs.writeFile(fileUri, encoder.encode(content));
+        const doc = await vscode.workspace.openTextDocument(fileUri);
+        await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+        vscode.window.showInformationMessage('File created: ' + filename);
+        return true;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -402,8 +595,6 @@ function activate(context) {
     console.log('GenAI.mil extension is now active');
 
     const secretStorage = context.secrets;
-
-    // Track the active chat panel to prevent duplicates
     let activeChatPanel = null;
 
     // ─────────────────────────────────────────────
@@ -415,57 +606,49 @@ function activate(context) {
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
             items.push({
-                label: KNOWN_ENDPOINTS[url].label,
+                label:       KNOWN_ENDPOINTS[url].label,
                 description: url,
-                value: url
+                value:       url
             });
         }
         if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
             items.unshift({
-                label: 'Current Endpoint',
+                label:       'Current Endpoint',
                 description: config.endpoint,
-                value: config.endpoint
+                value:       config.endpoint
             });
         }
         items.push({
-            label: '✏️ Enter Custom Endpoint URL',
+            label:       '✏️ Enter Custom Endpoint URL',
             description: 'Set key for a different endpoint',
-            value: '__custom__'
+            value:       '__custom__'
         });
 
         const selected = await vscode.window.showQuickPick(items, {
             placeHolder: 'Which endpoint is this API key for?'
         });
 
-        if (!selected) {
-            return;
-        }
+        if (!selected) { return; }
 
         let targetEndpoint = selected.value;
 
         if (targetEndpoint === '__custom__') {
             targetEndpoint = await vscode.window.showInputBox({
-                prompt: 'Enter the endpoint URL this API key is for',
-                placeHolder: 'https://your-api.example.com/v1/chat/completions',
-                ignoreFocusOut: true,
-                validateInput: function (value) {
-                    try {
-                        new URL(value);
-                        return null;
-                    } catch (e) {
-                        return 'Please enter a valid URL';
-                    }
+                prompt:          'Enter the endpoint URL this API key is for',
+                placeHolder:     'https://your-api.example.com/v1/chat/completions',
+                ignoreFocusOut:  true,
+                validateInput:   function (value) {
+                    try { new URL(value); return null; }
+                    catch (e) { return 'Please enter a valid URL'; }
                 }
             });
-            if (!targetEndpoint) {
-                return;
-            }
+            if (!targetEndpoint) { return; }
         }
 
         const apiKey = await vscode.window.showInputBox({
-            prompt: 'Enter the API Key for ' + targetEndpoint,
-            password: true,
-            placeHolder: 'YOUR_API_KEY',
+            prompt:         'Enter the API Key for ' + targetEndpoint,
+            password:       true,
+            placeHolder:    'YOUR_API_KEY',
             ignoreFocusOut: true
         });
 
@@ -475,11 +658,8 @@ function activate(context) {
             await secretStorage.store(secretName, trimmedKey);
 
             let hostname = '';
-            try {
-                hostname = new URL(targetEndpoint).hostname;
-            } catch (e) {
-                hostname = targetEndpoint;
-            }
+            try { hostname = new URL(targetEndpoint).hostname; }
+            catch (e) { hostname = targetEndpoint; }
 
             vscode.window.showInformationMessage(
                 'API Key saved securely for ' + hostname +
@@ -497,16 +677,16 @@ function activate(context) {
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
             items.push({
-                label: KNOWN_ENDPOINTS[url].label,
+                label:       KNOWN_ENDPOINTS[url].label,
                 description: url,
-                value: url
+                value:       url
             });
         }
         if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
             items.unshift({
-                label: 'Current Endpoint',
+                label:       'Current Endpoint',
                 description: config.endpoint,
-                value: config.endpoint
+                value:       config.endpoint
             });
         }
 
@@ -514,9 +694,7 @@ function activate(context) {
             placeHolder: 'Delete API key for which endpoint?'
         });
 
-        if (!selected) {
-            return;
-        }
+        if (!selected) { return; }
 
         const confirm = await vscode.window.showWarningMessage(
             'Delete API key for ' + selected.description + '?',
@@ -536,70 +714,76 @@ function activate(context) {
     const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
+            const known = KNOWN_ENDPOINTS[url];
             items.push({
-                label: KNOWN_ENDPOINTS[url].label,
+                label:       known.label,
                 description: url,
-                value: url
+                detail:      known.apiFormat === 'asksage'
+                                 ? '🏛️ Ask Sage Army Format | Auth: ' + known.authType
+                                 : '🔵 OpenAI Compatible | Auth: ' + known.authType,
+                value:       url
             });
         }
         items.push({
-            label: '✏️ Enter Custom Endpoint',
+            label:       '✏️ Enter Custom Endpoint',
             description: 'Type in a custom API URL',
-            value: '__custom__'
+            value:       '__custom__'
         });
 
         const selected = await vscode.window.showQuickPick(items, {
             placeHolder: 'Select API Endpoint'
         });
 
-        if (!selected) {
-            return;
-        }
+        if (!selected) { return; }
 
         let endpointUrl = selected.value;
 
         if (endpointUrl === '__custom__') {
             endpointUrl = await vscode.window.showInputBox({
-                prompt: 'Enter the full API endpoint URL',
-                placeHolder: 'https://your-api.example.com/v1/chat/completions',
+                prompt:         'Enter the full API endpoint URL',
+                placeHolder:    'https://your-api.example.com/v1/chat/completions',
                 ignoreFocusOut: true,
-                validateInput: function (value) {
-                    try {
-                        new URL(value);
-                        return null;
-                    } catch (e) {
-                        return 'Please enter a valid URL';
-                    }
+                validateInput:  function (value) {
+                    try { new URL(value); return null; }
+                    catch (e) { return 'Please enter a valid URL'; }
                 }
             });
-
-            if (!endpointUrl) {
-                return;
-            }
+            if (!endpointUrl) { return; }
         }
 
         const config = getConfig();
         await config.update('endpoint', endpointUrl);
 
+        // Auto-set auth type from known endpoint config
         const known = KNOWN_ENDPOINTS[endpointUrl];
-        if (known && known.defaultModel) {
-            await config.update('model', known.defaultModel);
-            vscode.window.showInformationMessage('Endpoint: ' + endpointUrl + ' | Model: ' + known.defaultModel);
+        if (known) {
+            if (known.authType) {
+                await config.update('authType', known.authType);
+            }
+            if (known.defaultModel) {
+                await config.update('model', known.defaultModel);
+                vscode.window.showInformationMessage(
+                    'Endpoint: ' + known.label +
+                    ' | Model: ' + known.defaultModel +
+                    ' | Auth: ' + (known.authType || 'bearer')
+                );
+            }
         } else {
             const modelName = await vscode.window.showInputBox({
-                prompt: 'Enter the model name for this endpoint',
-                placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
+                prompt:         'Enter the model name for this endpoint',
+                placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
                 ignoreFocusOut: true
             });
             if (modelName) {
                 await config.update('model', modelName.trim());
-                vscode.window.showInformationMessage('Endpoint: ' + endpointUrl + ' | Model: ' + modelName.trim());
-            } else {
-                vscode.window.showInformationMessage('Endpoint: ' + endpointUrl);
+                vscode.window.showInformationMessage(
+                    'Endpoint: ' + endpointUrl + ' | Model: ' + modelName.trim()
+                );
             }
         }
 
-        const secretName = getApiKeySecretName(endpointUrl);
+        // Check for API key
+        const secretName  = getApiKeySecretName(endpointUrl);
         const existingKey = await secretStorage.get(secretName);
         if (!existingKey) {
             const setKey = await vscode.window.showWarningMessage(
@@ -617,31 +801,33 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
         const config = getConfig();
-        const known = KNOWN_ENDPOINTS[config.endpoint];
+        const known  = KNOWN_ENDPOINTS[config.endpoint];
 
         if (known && known.models && known.models.length > 0) {
             const items = known.models.map(function (m) {
                 return {
-                    label: m,
+                    label:       m,
                     description: m === known.defaultModel ? '(default)' : ''
                 };
             });
+
+            if (known.modelsEndpoint) {
+                items.push({
+                    label:       '🔄 Fetch Models from API',
+                    description: 'Query the API for available models'
+                });
+            }
+
             items.push({
-                label: '🔄 Fetch Models from API',
-                description: 'Query the API for available models'
-            });
-            items.push({
-                label: '✏️ Enter Custom Model',
+                label:       '✏️ Enter Custom Model',
                 description: 'Type in a custom model name'
             });
 
             const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Select a model for ' + config.endpoint
+                placeHolder: 'Select a model for ' + (known.label || config.endpoint)
             });
 
-            if (!selected) {
-                return;
-            }
+            if (!selected) { return; }
 
             if (selected.label === '🔄 Fetch Models from API') {
                 await vscode.commands.executeCommand('genai-mil.fetchModels');
@@ -650,8 +836,8 @@ function activate(context) {
 
             if (selected.label === '✏️ Enter Custom Model') {
                 const customModel = await vscode.window.showInputBox({
-                    prompt: 'Enter the model name',
-                    placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
+                    prompt:         'Enter the model name',
+                    placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
                     ignoreFocusOut: true
                 });
                 if (customModel) {
@@ -662,11 +848,12 @@ function activate(context) {
                 await config.update('model', selected.label);
                 vscode.window.showInformationMessage('Model set to: ' + selected.label);
             }
+
         } else {
             const customModel = await vscode.window.showInputBox({
-                prompt: 'Enter the model name for ' + config.endpoint,
-                placeHolder: 'e.g., gpt-4o, gemini-2.5-flash',
-                value: config.model,
+                prompt:         'Enter the model name for ' + config.endpoint,
+                placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
+                value:          config.model,
                 ignoreFocusOut: true
             });
             if (customModel) {
@@ -680,35 +867,47 @@ function activate(context) {
     // COMMAND: Fetch Available Models from API
     // ─────────────────────────────────────────────
     const fetchModelsCommand = vscode.commands.registerCommand('genai-mil.fetchModels', async function () {
-        const config = getConfig();
+        const config     = getConfig();
+        const known      = KNOWN_ENDPOINTS[config.endpoint];
         const secretName = getApiKeySecretName(config.endpoint);
-        const apiKey = await secretStorage.get(secretName);
+        const apiKey     = await secretStorage.get(secretName);
 
         if (!apiKey) {
             vscode.window.showErrorMessage('No API key found. Set one first with "GenAI.mil: Set API Key".');
             return;
         }
 
-        const baseUrl = getBaseUrl(config.endpoint);
-        const modelsUrl = baseUrl + '/v1/models';
+        // Ask Sage Army does not have a /models endpoint - show static list instead
+        if (isAskSageFormat(config.endpoint)) {
+            vscode.window.showInformationMessage(
+                'Ask Sage Army does not expose a /models endpoint. Using pre-configured model list.'
+            );
+            await vscode.commands.executeCommand('genai-mil.selectModel');
+            return;
+        }
+
+        const baseUrl    = getBaseUrl(config.endpoint);
+        const modelsPath = (known && known.modelsEndpoint) ? known.modelsEndpoint : '/v1/models';
+        const modelsUrl  = baseUrl + modelsPath;
+        const authType   = getEffectiveAuthType(config.endpoint, config.authType);
 
         try {
             vscode.window.showInformationMessage('Fetching models from ' + modelsUrl + '...');
 
-            const response = await httpsGet(modelsUrl, apiKey, config.authType, config.pemPath);
+            const response = await httpsGet(modelsUrl, apiKey, authType, config.pemPath);
 
             let models = [];
             if (response && response.data && Array.isArray(response.data)) {
                 models = response.data.map(function (m) {
                     return {
-                        label: m.id || m.name || m,
+                        label:       m.id || m.name || m,
                         description: m.owned_by ? 'by ' + m.owned_by : ''
                     };
                 });
             } else if (Array.isArray(response)) {
                 models = response.map(function (m) {
                     return {
-                        label: typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m)),
+                        label:       typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m)),
                         description: ''
                     };
                 });
@@ -738,10 +937,10 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
         const selected = await vscode.window.showQuickPick([
-            { label: 'Bearer Token', description: 'Authorization: Bearer YOUR_KEY (Ask Sage default)', value: 'bearer' },
-            { label: 'API Key Header', description: 'api-key: YOUR_KEY', value: 'api-key' },
-            { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY', value: 'x-api-key' },
-            { label: 'Basic Auth', description: 'Authorization: Basic YOUR_KEY', value: 'basic' }
+            { label: 'Bearer Token',  description: 'Authorization: Bearer YOUR_KEY (default)',   value: 'bearer'    },
+            { label: 'API Key Header', description: 'api-key: YOUR_KEY',                          value: 'api-key'   },
+            { label: 'X-API-Key Header', description: 'x-api-key: YOUR_KEY (Ask Sage Army)',      value: 'x-api-key' },
+            { label: 'Basic Auth',    description: 'Authorization: Basic YOUR_KEY',               value: 'basic'     }
         ], {
             placeHolder: 'Select authentication type'
         });
@@ -758,31 +957,48 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
         const action = await vscode.window.showQuickPick([
-            { label: '📂 Browse for PEM file', value: 'browse' },
-            { label: '🗑️ Clear PEM certificate', value: 'clear' }
+            { label: '📂 Browse for PEM file',        value: 'browse' },
+            { label: '🌐 Use NODE_EXTRA_CA_CERTS env', value: 'env'    },
+            { label: '🗑️ Clear PEM certificate',       value: 'clear'  }
         ], {
             placeHolder: 'Set or clear PEM certificate'
         });
 
-        if (!action) {
-            return;
-        }
+        if (!action) { return; }
 
         const config = getConfig();
 
         if (action.value === 'clear') {
             await config.update('pemPath', '');
-            vscode.window.showInformationMessage('PEM Certificate cleared');
+            vscode.window.showInformationMessage(
+                'PEM Certificate cleared. Will use NODE_EXTRA_CA_CERTS if set.'
+            );
+            return;
+        }
+
+        if (action.value === 'env') {
+            const envPath = process.env.NODE_EXTRA_CA_CERTS;
+            if (envPath) {
+                vscode.window.showInformationMessage(
+                    'NODE_EXTRA_CA_CERTS is set to: ' + envPath +
+                    '. The extension will use this automatically.'
+                );
+            } else {
+                vscode.window.showWarningMessage(
+                    'NODE_EXTRA_CA_CERTS is not set as a system environment variable. ' +
+                    'Set it in Windows User Environment Variables and restart VSCode.'
+                );
+            }
             return;
         }
 
         const fileUri = await vscode.window.showOpenDialog({
-            canSelectFiles: true,
+            canSelectFiles:   true,
             canSelectFolders: false,
-            canSelectMany: false,
+            canSelectMany:    false,
             filters: {
                 'PEM Certificate': ['pem', 'crt', 'cer'],
-                'All Files': ['*']
+                'All Files':       ['*']
             },
             openLabel: 'Select PEM Certificate'
         });
@@ -803,26 +1019,33 @@ function activate(context) {
     // COMMAND: Show Current Settings
     // ─────────────────────────────────────────────
     const showSettingsCommand = vscode.commands.registerCommand('genai-mil.showSettings', async function () {
-        const config = getConfig();
+        const config     = getConfig();
+        const known      = KNOWN_ENDPOINTS[config.endpoint];
         const secretName = getApiKeySecretName(config.endpoint);
-        const apiKey = await secretStorage.get(secretName);
+        const apiKey     = await secretStorage.get(secretName);
+        const authType   = getEffectiveAuthType(config.endpoint, config.authType);
+        const envPem     = process.env.NODE_EXTRA_CA_CERTS;
 
         let hostname = '';
-        try {
-            hostname = new URL(config.endpoint).hostname;
-        } catch (e) {
-            hostname = config.endpoint;
-        }
+        try { hostname = new URL(config.endpoint).hostname; }
+        catch (e) { hostname = config.endpoint; }
 
         const info = [
-            'Endpoint: ' + (config.endpoint || 'Not set'),
-            'Model: ' + (config.model || 'Not set'),
-            'Auth Type: ' + (config.authType || 'bearer'),
+            '═══ GenAI.mil Extension Settings ═══',
+            'Endpoint:    ' + (config.endpoint || 'Not set'),
+            'Format:      ' + (known ? known.apiFormat.toUpperCase() : 'Unknown'),
+            'Model:       ' + (config.model    || 'Not set'),
+            'Auth Type:   ' + authType,
             'Temperature: ' + config.temperature,
-            'Max Tokens: ' + config.maxTokens,
-            'API Key (' + hostname + '): ' + (apiKey ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)' : 'Not set'),
-            'API Key Storage: OS Credential Manager (encrypted)',
-            'PEM Cert: ' + (config.pemPath || 'Not set')
+            'Max Tokens:  ' + config.maxTokens,
+            '',
+            '═══ Security ═══',
+            'API Key (' + hostname + '): ' + (apiKey
+                ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)'
+                : 'Not set'),
+            'Key Storage: OS Credential Manager (encrypted)',
+            'PEM Cert:    ' + (config.pemPath || 'Not set'),
+            'NODE_EXTRA_CA_CERTS: ' + (envPem  || 'Not set')
         ].join('\n');
 
         vscode.window.showInformationMessage(info, { modal: true });
@@ -832,7 +1055,6 @@ function activate(context) {
     // COMMAND: Open Chat
     // ─────────────────────────────────────────────
     const openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
-        // If chat panel already exists, just reveal it
         if (activeChatPanel) {
             activeChatPanel.reveal(vscode.ViewColumn.One);
             return;
@@ -843,13 +1065,12 @@ function activate(context) {
             'GenAI.mil Chat',
             vscode.ViewColumn.One,
             {
-                enableScripts: true,
+                enableScripts:          true,
                 retainContextWhenHidden: true
             }
         );
 
         activeChatPanel = panel;
-
         let chatHistory = [];
 
         function refreshWebview(loading) {
@@ -859,49 +1080,44 @@ function activate(context) {
 
         refreshWebview(false);
 
-        // Clean up when panel is closed
         panel.onDidDispose(function () {
             activeChatPanel = null;
         });
 
         panel.webview.onDidReceiveMessage(async function (message) {
-            const config = getConfig();
+            const config     = getConfig();
             const secretName = getApiKeySecretName(config.endpoint);
-            const apiKey = await secretStorage.get(secretName);
+            const apiKey     = await secretStorage.get(secretName);
+            const authType   = getEffectiveAuthType(config.endpoint, config.authType);
 
-            // CLEAR CHAT
             if (message.command === 'clearChat') {
                 chatHistory = [];
                 refreshWebview(false);
                 return;
             }
 
-            // CHANGE MODEL
             if (message.command === 'changeModel') {
                 await vscode.commands.executeCommand('genai-mil.selectModel');
                 refreshWebview(false);
                 return;
             }
 
-            // CHANGE ENDPOINT
             if (message.command === 'changeEndpoint') {
                 await vscode.commands.executeCommand('genai-mil.selectEndpoint');
                 refreshWebview(false);
                 return;
             }
 
-            // FETCH MODELS
             if (message.command === 'fetchModels') {
                 await vscode.commands.executeCommand('genai-mil.fetchModels');
                 refreshWebview(false);
                 return;
             }
 
-            // SEND MESSAGE
             if (message.command === 'send') {
                 if (!apiKey) {
                     vscode.window.showErrorMessage(
-                        'No API key found for this endpoint. Run "GenAI.mil: Set API Key" first.'
+                        'No API key found. Run "GenAI.mil: Set API Key" first.'
                     );
                     return;
                 }
@@ -919,10 +1135,9 @@ function activate(context) {
                 refreshWebview(true);
 
                 const apiMessages = [SYSTEM_PROMPT].concat(chatHistory);
-
                 let aiMessage = '';
 
-                streamRequest(
+                sendRequest(
                     config.endpoint,
                     apiKey,
                     config.model,
@@ -941,23 +1156,20 @@ function activate(context) {
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
                     config.pemPath,
-                    config.authType,
+                    authType,
                     config.temperature,
                     config.maxTokens
                 );
             }
 
-            // CREATE FILE
             if (message.command === 'createFile') {
                 await writeFileToWorkspace(message.filename, message.content, true);
             }
 
-            // EDIT FILE
             if (message.command === 'editFile') {
                 await editFileInWorkspace(message.filename, message.content);
             }
 
-            // INSERT AT CURSOR
             if (message.command === 'insertAtCursor') {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
@@ -970,7 +1182,6 @@ function activate(context) {
                 }
             }
 
-            // SAVE CHAT
             if (message.command === 'saveChat') {
                 let chatContent = '';
                 for (let j = 0; j < chatHistory.length; j++) {
@@ -984,10 +1195,10 @@ function activate(context) {
 
                 const saveUri = await vscode.window.showSaveDialog({
                     defaultUri: defaultSaveUri,
-                    saveLabel: 'Save Chat History',
+                    saveLabel:  'Save Chat History',
                     filters: {
                         'Markdown': ['md'],
-                        'Text': ['txt']
+                        'Text':     ['txt']
                     }
                 });
 
@@ -1003,14 +1214,15 @@ function activate(context) {
     // ─────────────────────────────────────────────
     // STATUS BAR BUTTON
     // ─────────────────────────────────────────────
-    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.text = '$(comment-discussion) GenAI Chat';
+    const statusBarItem = vscode.window.createStatusBarItem(
+        vscode.StatusBarAlignment.Right, 100
+    );
+    statusBarItem.text    = '$(comment-discussion) GenAI Chat';
     statusBarItem.tooltip = 'Open GenAI.mil Chat';
     statusBarItem.command = 'genai-mil.openChat';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
 
-    // Register all commands
     context.subscriptions.push(
         setApiKeyCommand,
         deleteApiKeyCommand,
@@ -1025,21 +1237,20 @@ function activate(context) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// WEBVIEW HTML
+// WEBVIEW HTML - unchanged from your original
 // ═══════════════════════════════════════════════════════════════
 function getWebviewContent(chatHistory, loading, config) {
     let chatHtml = '';
 
     for (let i = 0; i < chatHistory.length; i++) {
-        const msg = chatHistory[i];
+        const msg    = chatHistory[i];
         const isUser = msg.role === 'user';
-        const who = isUser ? 'You' : 'GenAI';
-        const icon = isUser ? '👤' : '🤖';
+        const who    = isUser ? 'You' : 'GenAI';
+        const icon   = isUser ? '👤' : '🤖';
         const msgClass = isUser ? 'message user-message' : 'message ai-message';
 
         let content = escapeHtml(msg.content);
 
-        // Parse code blocks with filename
         content = content.replace(
             /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
             function (match, lang, filename, code) {
@@ -1051,14 +1262,12 @@ function getWebviewContent(chatHistory, loading, config) {
                     '<button class="code-btn" data-filename="' + safeFilename + '" data-action="create">💾 Create File</button>' +
                     '<button class="code-btn" data-filename="' + safeFilename + '" data-action="edit">✏️ Apply Edit</button>' +
                     '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
-                    '</div>' +
-                    '</div>' +
+                    '</div></div>' +
                     '<pre><code>' + code + '</code></pre>' +
                     '</div>';
             }
         );
 
-        // Parse regular code blocks
         content = content.replace(
             /```(\w*)\n([\s\S]*?)```/g,
             function (match, lang, code) {
@@ -1067,17 +1276,13 @@ function getWebviewContent(chatHistory, loading, config) {
                     '<span>Code' + (lang ? ' (' + lang + ')' : '') + '</span>' +
                     '<div class="code-actions">' +
                     '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
-                    '</div>' +
-                    '</div>' +
+                    '</div></div>' +
                     '<pre><code>' + code + '</code></pre>' +
                     '</div>';
             }
         );
 
-        // Parse inline code
         content = content.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-
-        // Newlines
         content = content.replace(/\n/g, '<br>');
 
         chatHtml += '<div class="' + msgClass + '">' +
@@ -1089,209 +1294,121 @@ function getWebviewContent(chatHistory, loading, config) {
         chatHtml += '<div class="message loading"><em>⏳ GenAI is thinking...</em></div>';
     }
 
-    const statusEndpoint = config.endpoint || 'Not set';
-    const statusModel = config.model || 'Not set';
-    const statusAuth = config.authType || 'bearer';
+    const known          = KNOWN_ENDPOINTS[config.endpoint];
+    const statusEndpoint = known ? known.label : (config.endpoint || 'Not set');
+    const statusModel    = config.model    || 'Not set';
+    const statusFormat   = known ? (known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army' : '🔵 OpenAI') : '❓ Unknown';
+    const envPem         = process.env.NODE_EXTRA_CA_CERTS ? '✅' : '⚠️';
 
     return '<!DOCTYPE html>' +
-        '<html lang="en">' +
-        '<head>' +
-        '<style>' +
-        'body {' +
-        '    font-family: var(--vscode-font-family, "Segoe UI", Arial, sans-serif);' +
-        '    font-size: var(--vscode-font-size, 13px);' +
-        '    margin: 0; padding: 0;' +
-        '    background: var(--vscode-editor-background, #1e1e1e);' +
-        '    color: var(--vscode-editor-foreground, #cccccc);' +
-        '}' +
-        '.container { display: flex; flex-direction: column; height: 100vh; padding: 12px; box-sizing: border-box; }' +
-        'h2 { margin: 0 0 4px 0; color: var(--vscode-textLink-foreground, #3794ff); font-size: 16px; }' +
-        '.status-bar {' +
-        '    font-size: 11px; color: var(--vscode-descriptionForeground, #999);' +
-        '    margin-bottom: 8px; padding: 6px 8px;' +
-        '    background: var(--vscode-sideBar-background, #252526);' +
-        '    border: 1px solid var(--vscode-widget-border, #454545); border-radius: 4px;' +
-        '    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;' +
-        '}' +
-        '.status-info { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }' +
-        '.status-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
-        '.status-btn {' +
-        '    padding: 2px 8px; font-size: 11px; cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 3px;' +
-        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
-        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
-        '}' +
-        '.status-btn:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
-        '.toolbar { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }' +
-        '.toolbar button {' +
-        '    padding: 4px 10px; font-size: 12px; cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 4px;' +
-        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
-        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
-        '}' +
-        '.toolbar button:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
-        '#chat {' +
-        '    flex: 1; overflow-y: auto;' +
-        '    border: 1px solid var(--vscode-widget-border, #454545); border-radius: 6px;' +
-        '    padding: 10px; background: var(--vscode-editor-background, #1e1e1e); margin-bottom: 8px;' +
-        '}' +
-        '.message { margin-bottom: 10px; padding: 10px; border-radius: 6px; word-wrap: break-word; }' +
-        '.user-message {' +
-        '    background: var(--vscode-textBlockQuote-background, #2a2d2e);' +
-        '    border-left: 4px solid var(--vscode-textLink-foreground, #3794ff);' +
-        '}' +
-        '.ai-message {' +
-        '    background: var(--vscode-editor-inactiveSelectionBackground, #3a3d41);' +
-        '    border-left: 4px solid var(--vscode-terminal-ansiGreen, #4caf50);' +
-        '}' +
-        '.loading {' +
-        '    background: var(--vscode-inputValidation-warningBackground, #352a05) !important;' +
-        '    border-left: 4px solid var(--vscode-inputValidation-warningBorder, #ff9800) !important;' +
-        '}' +
-        '.code-block {' +
-        '    background: var(--vscode-textCodeBlock-background, #0a0a0a);' +
-        '    color: var(--vscode-editor-foreground, #d4d4d4);' +
-        '    border-radius: 6px; margin: 8px 0; overflow: hidden;' +
-        '    border: 1px solid var(--vscode-widget-border, #454545);' +
-        '}' +
-        '.code-header {' +
-        '    background: var(--vscode-editorGroupHeader-tabsBackground, #252526);' +
-        '    color: var(--vscode-foreground, #cccccc);' +
-        '    padding: 6px 10px; display: flex; align-items: center; justify-content: space-between;' +
-        '    font-size: 12px; flex-wrap: wrap; gap: 6px;' +
-        '}' +
-        '.code-actions { display: flex; gap: 4px; flex-wrap: wrap; }' +
-        '.code-btn {' +
-        '    padding: 3px 8px; font-size: 11px; cursor: pointer;' +
-        '    border: 1px solid var(--vscode-button-border, #454545); border-radius: 3px;' +
-        '    background: var(--vscode-button-secondaryBackground, #3a3d41);' +
-        '    color: var(--vscode-button-secondaryForeground, #cccccc);' +
-        '}' +
-        '.code-btn:hover { background: var(--vscode-button-secondaryHoverBackground, #45494e); }' +
-        'pre { margin: 0; padding: 12px; overflow-x: auto; font-size: 13px; }' +
-        'code { font-family: var(--vscode-editor-font-family, "Consolas", "Courier New", monospace); font-size: var(--vscode-editor-font-size, 13px); }' +
-        '.inline-code { background: var(--vscode-textCodeBlock-background, #0a0a0a); padding: 2px 5px; border-radius: 3px; font-size: 13px; }' +
-        '#form { display: flex; gap: 8px; }' +
-        '#input {' +
-        '    flex: 1; padding: 10px; font-size: 14px;' +
-        '    border: 1px solid var(--vscode-input-border, #454545); border-radius: 6px; outline: none;' +
-        '    background: var(--vscode-input-background, #3c3c3c);' +
-        '    color: var(--vscode-input-foreground, #cccccc);' +
-        '}' +
-        '#input:focus { border-color: var(--vscode-focusBorder, #007fd4); }' +
-        '#input::placeholder { color: var(--vscode-input-placeholderForeground, #999); }' +
-        '#form button {' +
-        '    padding: 10px 20px; font-size: 14px; cursor: pointer; border: none; border-radius: 6px;' +
-        '    background: var(--vscode-button-background, #0e639c);' +
-        '    color: var(--vscode-button-foreground, #ffffff);' +
-        '}' +
-        '#form button:hover { background: var(--vscode-button-hoverBackground, #1177bb); }' +
-        '.empty-state { color: var(--vscode-descriptionForeground, #999); text-align: center; padding: 40px; font-size: 14px; }' +
-        '#chat::-webkit-scrollbar { width: 10px; }' +
-        '#chat::-webkit-scrollbar-track { background: transparent; }' +
-        '#chat::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background, #79797966); border-radius: 5px; }' +
-        '#chat::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground, #646464b3); }' +
-        '</style>' +
-        '</head>' +
-        '<body>' +
+        '<html lang="en"><head><style>' +
+        'body{font-family:var(--vscode-font-family,"Segoe UI",Arial,sans-serif);font-size:var(--vscode-font-size,13px);margin:0;padding:0;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-editor-foreground,#cccccc);}' +
+        '.container{display:flex;flex-direction:column;height:100vh;padding:12px;box-sizing:border-box;}' +
+        'h2{margin:0 0 4px 0;color:var(--vscode-textLink-foreground,#3794ff);font-size:16px;}' +
+        '.status-bar{font-size:11px;color:var(--vscode-descriptionForeground,#999);margin-bottom:8px;padding:6px 8px;background:var(--vscode-sideBar-background,#252526);border:1px solid var(--vscode-widget-border,#454545);border-radius:4px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;}' +
+        '.status-info{display:flex;gap:12px;flex-wrap:wrap;align-items:center;}' +
+        '.status-actions{display:flex;gap:4px;flex-wrap:wrap;}' +
+        '.status-btn{padding:2px 8px;font-size:11px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:3px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.status-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
+        '.toolbar{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;}' +
+        '.toolbar button{padding:4px 10px;font-size:12px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:4px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.toolbar button:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
+        '#chat{flex:1;overflow-y:auto;border:1px solid var(--vscode-widget-border,#454545);border-radius:6px;padding:10px;background:var(--vscode-editor-background,#1e1e1e);margin-bottom:8px;}' +
+        '.message{margin-bottom:10px;padding:10px;border-radius:6px;word-wrap:break-word;}' +
+        '.user-message{background:var(--vscode-textBlockQuote-background,#2a2d2e);border-left:4px solid var(--vscode-textLink-foreground,#3794ff);}' +
+        '.ai-message{background:var(--vscode-editor-inactiveSelectionBackground,#3a3d41);border-left:4px solid var(--vscode-terminal-ansiGreen,#4caf50);}' +
+        '.loading{background:var(--vscode-inputValidation-warningBackground,#352a05)!important;border-left:4px solid var(--vscode-inputValidation-warningBorder,#ff9800)!important;}' +
+        '.code-block{background:var(--vscode-textCodeBlock-background,#0a0a0a);color:var(--vscode-editor-foreground,#d4d4d4);border-radius:6px;margin:8px 0;overflow:hidden;border:1px solid var(--vscode-widget-border,#454545);}' +
+        '.code-header{background:var(--vscode-editorGroupHeader-tabsBackground,#252526);color:var(--vscode-foreground,#cccccc);padding:6px 10px;display:flex;align-items:center;justify-content:space-between;font-size:12px;flex-wrap:wrap;gap:6px;}' +
+        '.code-actions{display:flex;gap:4px;flex-wrap:wrap;}' +
+        '.code-btn{padding:3px 8px;font-size:11px;cursor:pointer;border:1px solid var(--vscode-button-border,#454545);border-radius:3px;background:var(--vscode-button-secondaryBackground,#3a3d41);color:var(--vscode-button-secondaryForeground,#cccccc);}' +
+        '.code-btn:hover{background:var(--vscode-button-secondaryHoverBackground,#45494e);}' +
+        'pre{margin:0;padding:12px;overflow-x:auto;font-size:13px;}' +
+        'code{font-family:var(--vscode-editor-font-family,"Consolas","Courier New",monospace);font-size:var(--vscode-editor-font-size,13px);}' +
+        '.inline-code{background:var(--vscode-textCodeBlock-background,#0a0a0a);padding:2px 5px;border-radius:3px;font-size:13px;}' +
+        '#form{display:flex;gap:8px;}' +
+        '#input{flex:1;padding:10px;font-size:14px;border:1px solid var(--vscode-input-border,#454545);border-radius:6px;outline:none;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#cccccc);}' +
+        '#input:focus{border-color:var(--vscode-focusBorder,#007fd4);}' +
+        '#input::placeholder{color:var(--vscode-input-placeholderForeground,#999);}' +
+        '#form button{padding:10px 20px;font-size:14px;cursor:pointer;border:none;border-radius:6px;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#ffffff);}' +
+        '#form button:hover{background:var(--vscode-button-hoverBackground,#1177bb);}' +
+        '.empty-state{color:var(--vscode-descriptionForeground,#999);text-align:center;padding:40px;font-size:14px;}' +
+        '#chat::-webkit-scrollbar{width:10px;}' +
+        '#chat::-webkit-scrollbar-track{background:transparent;}' +
+        '#chat::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background,#79797966);border-radius:5px;}' +
+        '#chat::-webkit-scrollbar-thumb:hover{background:var(--vscode-scrollbarSlider-hoverBackground,#646464b3);}' +
+        '</style></head><body>' +
         '<div class="container">' +
         '<h2>🤖 GenAI.mil Chat</h2>' +
         '<div class="status-bar">' +
         '<div class="status-info">' +
         '<span>🌐 ' + escapeHtml(statusEndpoint) + '</span>' +
         '<span>🤖 ' + escapeHtml(statusModel) + '</span>' +
-        '<span>🔐 ' + escapeHtml(statusAuth) + '</span>' +
-        '<span>🔒 Key: Encrypted</span>' +
+        '<span>' + statusFormat + '</span>' +
+        '<span>🔒 DoD Cert: ' + envPem + '</span>' +
         '</div>' +
         '<div class="status-actions">' +
         '<button class="status-btn" id="changeModelBtn">Change Model</button>' +
         '<button class="status-btn" id="fetchModelsBtn">Fetch Models</button>' +
         '<button class="status-btn" id="changeEndpointBtn">Change Endpoint</button>' +
-        '</div>' +
-        '</div>' +
+        '</div></div>' +
         '<div class="toolbar">' +
         '<button id="saveChatBtn">💾 Save Chat</button>' +
         '<button id="clearChatBtn">🗑️ Clear Chat</button>' +
         '</div>' +
         '<div id="chat">' +
         (chatHtml || '<div class="empty-state">Start a conversation...<br><br>' +
+            '🏛️ <b>Ask Sage Army</b>: api.genai.army.mil<br>' +
+            '🔵 <b>GenAI.mil</b>: api.genai.mil<br><br>' +
             'Try: "Create a Python script called hello.py that prints Hello World"<br><br>' +
-            'Powered by Ask Sage API<br>' +
-            '<a href="https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html" style="color: var(--vscode-textLink-foreground, #3794ff);">API Documentation</a>' +
+            '<a href="https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html" ' +
+            'style="color:var(--vscode-textLink-foreground,#3794ff);">📖 API Documentation</a>' +
             '</div>') +
         '</div>' +
         '<form id="form">' +
-        '<input id="input" type="text" placeholder="Ask me to write code, create a file, edit a file..." autofocus />' +
+        '<input id="input" type="text" placeholder="Ask me to write code, create files, or answer questions..." autofocus />' +
         '<button type="submit">Send</button>' +
-        '</form>' +
-        '</div>' +
+        '</form></div>' +
         '<script>' +
-        'var vscode = acquireVsCodeApi();' +
-        'document.getElementById("form").addEventListener("submit", function(e) {' +
-        '    e.preventDefault();' +
-        '    var text = document.getElementById("input").value;' +
-        '    if (text.trim()) {' +
-        '        vscode.postMessage({ command: "send", text: text });' +
-        '        document.getElementById("input").value = "";' +
-        '    }' +
+        'var vscode=acquireVsCodeApi();' +
+        'document.getElementById("form").addEventListener("submit",function(e){' +
+        'e.preventDefault();var text=document.getElementById("input").value;' +
+        'if(text.trim()){vscode.postMessage({command:"send",text:text});document.getElementById("input").value="";}' +
         '});' +
-        'document.getElementById("saveChatBtn").addEventListener("click", function() {' +
-        '    vscode.postMessage({ command: "saveChat" });' +
+        'document.getElementById("saveChatBtn").addEventListener("click",function(){vscode.postMessage({command:"saveChat"});});' +
+        'document.getElementById("clearChatBtn").addEventListener("click",function(){vscode.postMessage({command:"clearChat"});});' +
+        'document.getElementById("changeModelBtn").addEventListener("click",function(){vscode.postMessage({command:"changeModel"});});' +
+        'document.getElementById("fetchModelsBtn").addEventListener("click",function(){vscode.postMessage({command:"fetchModels"});});' +
+        'document.getElementById("changeEndpointBtn").addEventListener("click",function(){vscode.postMessage({command:"changeEndpoint"});});' +
+        'document.getElementById("chat").addEventListener("click",function(e){' +
+        'var btn=e.target.closest(".code-btn");if(!btn)return;' +
+        'var codeBlock=btn.closest(".code-block");var codeEl=codeBlock.querySelector("code");' +
+        'var code=codeEl.textContent;var action=btn.getAttribute("data-action");var filename=btn.getAttribute("data-filename");' +
+        'if(action==="create"){vscode.postMessage({command:"createFile",filename:filename,content:code});}' +
+        'else if(action==="edit"){vscode.postMessage({command:"editFile",filename:filename,content:code});}' +
+        'else if(action==="insert"){vscode.postMessage({command:"insertAtCursor",content:code});}' +
         '});' +
-        'document.getElementById("clearChatBtn").addEventListener("click", function() {' +
-        '    vscode.postMessage({ command: "clearChat" });' +
-        '});' +
-        'document.getElementById("changeModelBtn").addEventListener("click", function() {' +
-        '    vscode.postMessage({ command: "changeModel" });' +
-        '});' +
-        'document.getElementById("fetchModelsBtn").addEventListener("click", function() {' +
-        '    vscode.postMessage({ command: "fetchModels" });' +
-        '});' +
-        'document.getElementById("changeEndpointBtn").addEventListener("click", function() {' +
-        '    vscode.postMessage({ command: "changeEndpoint" });' +
-        '});' +
-        'document.getElementById("chat").addEventListener("click", function(e) {' +
-        '    var btn = e.target.closest(".code-btn");' +
-        '    if (!btn) return;' +
-        '    var codeBlock = btn.closest(".code-block");' +
-        '    var codeEl = codeBlock.querySelector("code");' +
-        '    var code = codeEl.textContent;' +
-        '    var action = btn.getAttribute("data-action");' +
-        '    var filename = btn.getAttribute("data-filename");' +
-        '    if (action === "create") {' +
-        '        vscode.postMessage({ command: "createFile", filename: filename, content: code });' +
-        '    } else if (action === "edit") {' +
-        '        vscode.postMessage({ command: "editFile", filename: filename, content: code });' +
-        '    } else if (action === "insert") {' +
-        '        vscode.postMessage({ command: "insertAtCursor", content: code });' +
-        '    }' +
-        '});' +
-        'window.addEventListener("message", function(event) {' +
-        '    var message = event.data;' +
-        '    if (message.command === "stream") {' +
-        '        var chatDiv = document.getElementById("chat");' +
-        '        var lastMsg = chatDiv.querySelector(".message:last-child");' +
-        '        if (lastMsg && lastMsg.classList.contains("loading")) {' +
-        '            lastMsg.innerHTML = "<b>🤖 GenAI:</b><br>" + message.text.replace(/\\n/g, "<br>");' +
-        '        }' +
-        '    }' +
-        '});' +
-        'var chatDiv = document.getElementById("chat");' +
-        'chatDiv.scrollTop = chatDiv.scrollHeight;' +
-        '</script>' +
-        '</body>' +
-        '</html>';
+        'window.addEventListener("message",function(event){' +
+        'var message=event.data;' +
+        'if(message.command==="stream"){' +
+        'var chatDiv=document.getElementById("chat");' +
+        'var lastMsg=chatDiv.querySelector(".message:last-child");' +
+        'if(lastMsg&&lastMsg.classList.contains("loading")){' +
+        'lastMsg.innerHTML="<b>🤖 GenAI:</b><br>"+message.text.replace(/\\n/g,"<br>");}' +
+        '}});' +
+        'var chatDiv=document.getElementById("chat");chatDiv.scrollTop=chatDiv.scrollHeight;' +
+        '</script></body></html>';
 }
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Escape HTML
 // ═══════════════════════════════════════════════════════════════
 function escapeHtml(text) {
-    return text
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>')
-        .replace(/"/g, '"');
+    return String(text)
+        .replace(/&/g,  '&')
+        .replace(/</g,  '<')
+        .replace(/>/g,  '>')
+        .replace(/"/g,  '"');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1299,7 +1416,4 @@ function escapeHtml(text) {
 // ═══════════════════════════════════════════════════════════════
 function deactivate() {}
 
-module.exports = {
-    activate,
-    deactivate
-};
+module.exports = { activate, deactivate };

@@ -1,8 +1,8 @@
 {
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
-  "description": "Connect to GenAI.mil and Ask Sage APIs from VS Code with interactive chat and file editing",
-  "version": "8.0.0",
+  "description": "Connect to GenAI.mil, Ask Sage, and Ask Sage Army (api.genai.army.mil) APIs from VS Code with interactive chat and file editing",
+  "version": "9.0.0",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -83,46 +83,78 @@
       "properties": {
         "genai-mil.endpoint": {
           "type": "string",
-          "default": "https://api.genai.mil/v1/chat/completions",
-          "description": "API Endpoint URL (supports custom URLs)"
+          "default": "https://api.genai.army.mil/server/query",
+          "enum": [
+            "https://api.genai.army.mil/server/query",
+            "https://api.genai.mil/v1/chat/completions",
+            "https://api.asksage.ai/v1/chat/completions"
+          ],
+          "enumDescriptions": [
+            "Ask Sage Army - DoD Government (api.genai.army.mil) - Uses x-api-key auth and Ask Sage request format",
+            "GenAI.mil Chat Completions - OpenAI compatible streaming API",
+            "Ask Sage Chat Completions - OpenAI compatible streaming API"
+          ],
+          "description": "API Endpoint URL. Select a known endpoint or enter a custom URL via the command palette."
         },
         "genai-mil.model": {
           "type": "string",
-          "default": "gemini-2.5-flash",
-          "description": "Model to use for completions"
+          "default": "gpt-4.1-gov",
+          "description": "Model to use for completions. Use 'GenAI.mil: Select Model' to pick from the list for your endpoint."
         },
         "genai-mil.authType": {
           "type": "string",
-          "default": "bearer",
-          "enum": ["bearer", "api-key", "x-api-key", "basic"],
+          "default": "x-api-key",
+          "enum": [
+            "bearer",
+            "api-key",
+            "x-api-key",
+            "basic"
+          ],
           "enumDescriptions": [
-            "Authorization: Bearer YOUR_KEY",
+            "Authorization: Bearer YOUR_KEY (GenAI.mil default)",
             "api-key: YOUR_KEY",
-            "x-api-key: YOUR_KEY",
+            "x-api-key: YOUR_KEY (Ask Sage Army default)",
             "Authorization: Basic YOUR_KEY"
           ],
-          "description": "Authentication header type for the API"
+          "description": "Authentication header type. Auto-set when selecting a known endpoint."
         },
         "genai-mil.pemPath": {
           "type": "string",
           "default": "",
-          "description": "Path to PEM certificate file for SSL/TLS connections"
+          "description": "Path to PEM certificate file for DoD SSL/TLS connections. Leave empty to use NODE_EXTRA_CA_CERTS environment variable (recommended for DoD networks)."
         },
         "genai-mil.temperature": {
           "type": "number",
           "default": 0.7,
           "minimum": 0,
           "maximum": 2,
-          "description": "Temperature for model responses (0 = deterministic, 2 = creative)"
+          "description": "Temperature for model responses (0 = deterministic, 2 = most creative). Note: Not used for Ask Sage Army endpoint."
         },
         "genai-mil.maxTokens": {
           "type": "number",
           "default": 4096,
           "minimum": 1,
           "maximum": 128000,
-          "description": "Maximum number of tokens in the response"
+          "description": "Maximum number of tokens in the response. Note: Not used for Ask Sage Army endpoint."
         }
       }
     }
-  }
+  },
+  "keywords": [
+    "genai",
+    "army",
+    "mil",
+    "asksage",
+    "ask-sage",
+    "dod",
+    "government",
+    "ai",
+    "chat",
+    "gpt",
+    "gemini",
+    "claude",
+    "llm",
+    "copilot"
+  ],
+  "license": "MIT"
 }
