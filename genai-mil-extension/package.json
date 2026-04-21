@@ -2,13 +2,11 @@
     "name": "genai-mil-connector",
     "displayName": "GenAI.mil Connector",
     "description": "Connect to GenAI.mil, Ask Sage, and Ask Sage Army (api.genai.army.mil) APIs from VS Code with interactive chat and file editing",
-    "version": "9.3.1",
+    "version": "9.4.0",
     "engines": {
         "vscode": "^1.60.0"
     },
-    "categories": [
-        "Other"
-    ],
+    "categories": ["Other"],
     "icon": "icon.png",
     "activationEvents": [
         "onCommand:genai-mil.openChat",
@@ -24,60 +22,22 @@
     "main": "./extension.js",
     "contributes": {
         "commands": [
-            {
-                "command": "genai-mil.openChat",
-                "title": "GenAI.mil: Open Chat",
-                "icon": {
-                    "light": "resources/chat-light.svg",
-                    "dark": "resources/chat-dark.svg"
-                }
-            },
-            {
-                "command": "genai-mil.setApiKey",
-                "title": "GenAI.mil: Set API Key"
-            },
-            {
-                "command": "genai-mil.deleteApiKey",
-                "title": "GenAI.mil: Delete API Key"
-            },
-            {
-                "command": "genai-mil.selectEndpoint",
-                "title": "GenAI.mil: Select Endpoint"
-            },
-            {
-                "command": "genai-mil.selectModel",
-                "title": "GenAI.mil: Select Model"
-            },
-            {
-                "command": "genai-mil.setAuthType",
-                "title": "GenAI.mil: Set Auth Type"
-            },
-            {
-                "command": "genai-mil.setPemCert",
-                "title": "GenAI.mil: Set PEM Certificate"
-            },
-            {
-                "command": "genai-mil.showSettings",
-                "title": "GenAI.mil: Show Current Settings"
-            },
-            {
-                "command": "genai-mil.fetchModels",
-                "title": "GenAI.mil: Fetch Available Models"
-            }
+            { "command": "genai-mil.openChat",       "title": "GenAI.mil: Open Chat" },
+            { "command": "genai-mil.setApiKey",      "title": "GenAI.mil: Set API Key" },
+            { "command": "genai-mil.deleteApiKey",   "title": "GenAI.mil: Delete API Key" },
+            { "command": "genai-mil.selectEndpoint", "title": "GenAI.mil: Select Endpoint" },
+            { "command": "genai-mil.selectModel",    "title": "GenAI.mil: Select Model" },
+            { "command": "genai-mil.setAuthType",    "title": "GenAI.mil: Set Auth Type" },
+            { "command": "genai-mil.setPemCert",     "title": "GenAI.mil: Set PEM Certificate" },
+            { "command": "genai-mil.showSettings",   "title": "GenAI.mil: Show Current Settings" },
+            { "command": "genai-mil.fetchModels",    "title": "GenAI.mil: Fetch Available Models" }
         ],
         "menus": {
             "editor/title": [
-                {
-                    "command": "genai-mil.openChat",
-                    "group": "navigation",
-                    "when": "true"
-                }
+                { "command": "genai-mil.openChat", "group": "navigation", "when": "true" }
             ],
             "editor/title/context": [
-                {
-                    "command": "genai-mil.openChat",
-                    "group": "navigation"
-                }
+                { "command": "genai-mil.openChat", "group": "navigation" }
             ]
         },
         "configuration": {
@@ -96,30 +56,23 @@
                         "GenAI.mil Chat Completions - OpenAI compatible streaming API",
                         "Ask Sage Chat Completions - OpenAI compatible streaming API"
                     ],
-                    "description": "API Endpoint URL. Select a known endpoint or enter a custom URL via the command palette."
+                    "description": "API Endpoint URL."
                 },
                 "genai-mil.model": {
                     "type": "string",
                     "default": "gpt-4.1-gov",
-                    "description": "Model to use for completions. Use 'GenAI.mil: Select Model' or 'Fetch Models' to pick from available models."
+                    "description": "Model to use. Use 'Fetch Models' to get the latest list from the API."
                 },
                 "genai-mil.authType": {
                     "type": "string",
                     "default": "x-access-tokens",
-                    "enum": [
-                        "bearer",
-                        "api-key",
-                        "x-api-key",
-                        "x-access-tokens",
-                        "anthropic-auth-token",
-                        "basic"
-                    ],
+                    "enum": ["bearer","api-key","x-api-key","x-access-tokens","anthropic-auth-token","basic"],
                     "enumDescriptions": [
-                        "Authorization: Bearer YOUR_KEY (GenAI.mil default)",
+                        "Authorization: Bearer YOUR_KEY",
                         "api-key: YOUR_KEY",
                         "x-api-key: YOUR_KEY",
-                        "x-access-tokens: YOUR_KEY (Ask Sage Army - api.genai.army.mil)",
-                        "ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy - no longer used)",
+                        "x-access-tokens: YOUR_KEY (Ask Sage Army native - use this)",
+                        "ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy)",
                         "Authorization: Basic YOUR_KEY"
                     ],
                     "description": "Authentication header type. Auto-set when selecting a known endpoint."
@@ -127,40 +80,25 @@
                 "genai-mil.pemPath": {
                     "type": "string",
                     "default": "",
-                    "description": "Path to PEM certificate file for DoD SSL/TLS connections. Leave empty to use NODE_EXTRA_CA_CERTS environment variable (recommended for DoD networks)."
+                    "description": "Path to DoD PEM certificate. Leave empty to use NODE_EXTRA_CA_CERTS."
                 },
                 "genai-mil.temperature": {
                     "type": "number",
                     "default": 0.7,
                     "minimum": 0,
                     "maximum": 2,
-                    "description": "Temperature for model responses (0 = deterministic, 2 = most creative). Note: Not used for Ask Sage Army endpoint."
+                    "description": "Temperature (0=deterministic, 2=creative). Not used for Ask Sage Army endpoint."
                 },
                 "genai-mil.maxTokens": {
                     "type": "number",
                     "default": 4096,
                     "minimum": 1,
                     "maximum": 128000,
-                    "description": "Maximum number of tokens in the response. Note: Not used for Ask Sage Army endpoint."
+                    "description": "Max tokens in response. Not used for Ask Sage Army endpoint."
                 }
             }
         }
     },
-    "keywords": [
-        "genai",
-        "army",
-        "mil",
-        "asksage",
-        "ask-sage",
-        "dod",
-        "government",
-        "ai",
-        "chat",
-        "gpt",
-        "gemini",
-        "claude",
-        "llm",
-        "copilot"
-    ],
+    "keywords": ["genai","army","mil","asksage","ask-sage","dod","government","ai","chat","gpt","gemini","claude","llm","copilot"],
     "license": "MIT"
 }

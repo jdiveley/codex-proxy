@@ -11,7 +11,7 @@ const KNOWN_ENDPOINTS = {
         baseUrl: "https://api.genai.army.mil",
         defaultModel: "gpt-4.1-gov",
         apiFormat: "asksage",
-        authType: "x-access-tokens",  // FIXED: was "anthropic-auth-token"
+        authType: "x-access-tokens",
         models: [
             "gpt-4.1-gov",
             "gpt-4.1-mini-gov",
@@ -137,14 +137,13 @@ function getEffectiveAuthType(endpoint, configAuthType) {
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Build auth headers based on auth type
-// FIXED: Added x-access-tokens case (used by Ask Sage Army)
 // ═══════════════════════════════════════════════════════════════
 function getAuthHeaders(apiKey, authType) {
     const headers = {
         'Content-Type': 'application/json'
     };
     switch (authType) {
-        case 'x-access-tokens':          // ADDED: Ask Sage Army native auth
+        case 'x-access-tokens':
             headers['x-access-tokens'] = apiKey;
             break;
         case 'api-key':
@@ -153,7 +152,7 @@ function getAuthHeaders(apiKey, authType) {
         case 'x-api-key':
             headers['x-api-key'] = apiKey;
             break;
-        case 'anthropic-auth-token':     // kept for legacy/custom use
+        case 'anthropic-auth-token':
             headers['ANTHROPIC_AUTH_TOKEN'] = apiKey;
             break;
         case 'basic':
@@ -169,7 +168,6 @@ function getAuthHeaders(apiKey, authType) {
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Load DoD PEM certificate into HTTPS options
-// Supports both explicit pemPath and NODE_EXTRA_CA_CERTS
 // ═══════════════════════════════════════════════════════════════
 function applyPemCert(options, pemPath) {
     if (pemPath) {
@@ -243,8 +241,6 @@ function httpsGet(endpoint, apiKey, authType, pemPath) {
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Fetch models from Ask Sage Army API
-// FIXED: Uses x-access-tokens header (matching Pi extension)
-// Tries multiple known model endpoints
 // ═══════════════════════════════════════════════════════════════
 function fetchAskSageModels(baseUrl, apiKey, pemPath) {
     return new Promise(function (resolve, reject) {
@@ -261,9 +257,7 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
 
         function tryNext() {
             if (currentIndex >= endpointsToTry.length) {
-                reject(new Error(
-                    'Could not find models endpoint. Tried: ' + endpointsToTry.join(', ')
-                ));
+                reject(new Error('Could not find models endpoint. Tried: ' + endpointsToTry.join(', ')));
                 return;
             }
 
@@ -287,7 +281,7 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
                 method:   'GET',
                 headers: {
                     'Content-Type':    'application/json',
-                    'x-access-tokens': apiKey.trim()  // FIXED: was ANTHROPIC_AUTH_TOKEN
+                    'x-access-tokens': apiKey.trim()
                 }
             };
 
@@ -336,8 +330,9 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
 // HELPER: Ask Sage Army API request
 // POST /server/query
 // Body: { message: "...", model: "..." }
-// Auth: x-access-tokens header (FIXED - matches Pi extension)
-// Response: { response: "..." }
+// Auth: x-access-tokens header
+// Response: { message: "<AI reply>", response: "OK", status: 200 }
+// FIXED: "message" field contains the AI reply, "response" is just "OK"
 // ═══════════════════════════════════════════════════════════════
 function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
     let url;
@@ -348,7 +343,7 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         return;
     }
 
-    // Build a single message string from the messages array
+    // Build message string from messages array
     let fullMessage = '';
 
     const systemMsg = messages.find(function (m) { return m.role === 'system'; });
@@ -371,8 +366,9 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
     }
 
     const payload = JSON.stringify({
-        message: fullMessage.trim(),
-        model:   model
+        message:          fullMessage.trim(),
+        model:            model,
+        limit_references: 0       // from Pi extension - prevents reference injection
     });
 
     console.log('GenAI.mil: Ask Sage Army request to ' + endpoint);
@@ -381,7 +377,6 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
     console.log('GenAI.mil: API Key length: ' + (apiKey ? apiKey.length : 0));
     console.log('GenAI.mil: API Key preview: ' + (apiKey ? apiKey.substring(0, 8) + '...' : 'MISSING'));
 
-    // FIXED: Use x-access-tokens header (as confirmed by Pi extension)
     const options = {
         hostname: url.hostname,
         port:     url.port || 443,
@@ -389,7 +384,7 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         method:   'POST',
         headers: {
             'Content-Type':    'application/json',
-            'x-access-tokens': apiKey.trim(),      // FIXED: was ANTHROPIC_AUTH_TOKEN
+            'x-access-tokens': apiKey.trim(),
             'Content-Length':  Buffer.byteLength(payload)
         }
     };
@@ -422,16 +417,38 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
             console.log('GenAI.mil: Ask Sage Army raw response: ' + body);
             try {
                 const parsed = JSON.parse(body);
+
+                // ─────────────────────────────────────────────────────
+                // CRITICAL FIX: Ask Sage Army response format is:
+                //   { "message": "<AI answer>", "response": "OK", "status": 200 }
+                // "response" is always "OK" (a status string), NOT the AI reply.
+                // "message" contains the actual AI-generated text.
+                // Always check "message" first, then fall back to others.
+                // ─────────────────────────────────────────────────────
                 const responseText =
-                    parsed.response ||
-                    parsed.message  ||
+                    parsed.message  ||   // ← ACTUAL AI reply (fixed order)
                     parsed.content  ||
                     parsed.text     ||
                     parsed.answer   ||
                     parsed.output   ||
+                    (parsed.response && parsed.response !== 'OK' ? parsed.response : null) ||
                     JSON.stringify(parsed);
 
-                onData(responseText);
+                // Check for API-level errors embedded in a 200 response
+                if (parsed.status && parsed.status !== 200) {
+                    onError(new Error('Ask Sage API error (status ' + parsed.status + '): ' + responseText));
+                    return;
+                }
+
+                // Strip leading newlines (Pi extension does this too)
+                const cleanedText = responseText.replace(/^\n+/, '');
+
+                if (!cleanedText || cleanedText.trim() === '') {
+                    onError(new Error('Empty response from Ask Sage Army API'));
+                    return;
+                }
+
+                onData(cleanedText);
                 onDone();
 
             } catch (e) {
@@ -962,7 +979,6 @@ function activate(context) {
             return;
         }
 
-        // ── Ask Sage Army endpoint ──────────────────────
         if (isAskSageFormat(config.endpoint)) {
             await vscode.window.withProgress({
                 location:    vscode.ProgressLocation.Notification,
@@ -1000,9 +1016,7 @@ function activate(context) {
                             return m.id || m.name || m.model || JSON.stringify(m);
                         });
                     } else {
-                        vscode.window.showWarningMessage(
-                            'Unknown models response format. Check Developer Tools Console for raw data.'
-                        );
+                        vscode.window.showWarningMessage('Unknown models response format. Check Developer Tools Console for raw data.');
                         console.log('GenAI.mil: Unknown format: ' + JSON.stringify(data));
                         return;
                     }
@@ -1012,16 +1026,12 @@ function activate(context) {
                         return;
                     }
 
-                    // Sort and deduplicate
                     models = models
                         .filter(function (m) { return m && m.length > 0; })
                         .filter(function (m, i, arr) { return arr.indexOf(m) === i; })
                         .sort();
 
-                    // Update the known models list dynamically
-                    if (known) {
-                        known.models = models;
-                    }
+                    if (known) { known.models = models; }
 
                     const items = models.map(function (m) {
                         return {
@@ -1041,17 +1051,13 @@ function activate(context) {
 
                 } catch (error) {
                     console.log('GenAI.mil: fetchAskSageModels error: ' + error.message);
-                    vscode.window.showErrorMessage(
-                        'Could not fetch models: ' + error.message +
-                        ' — Using pre-configured list instead.'
-                    );
+                    vscode.window.showErrorMessage('Could not fetch models: ' + error.message + ' — Using pre-configured list instead.');
                     await vscode.commands.executeCommand('genai-mil.selectModel');
                 }
             });
             return;
         }
 
-        // ── OpenAI-compatible endpoints ─────────────────
         const baseUrl    = getBaseUrl(config.endpoint);
         const modelsPath = (known && known.modelsEndpoint) ? known.modelsEndpoint : '/v1/models';
         const modelsUrl  = baseUrl + modelsPath;
@@ -1107,12 +1113,12 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
         const selected = await vscode.window.showQuickPick([
-            { label: 'Bearer Token',         description: 'Authorization: Bearer YOUR_KEY (default)',           value: 'bearer'               },
-            { label: 'API Key Header',        description: 'api-key: YOUR_KEY',                                  value: 'api-key'              },
-            { label: 'X-API-Key Header',      description: 'x-api-key: YOUR_KEY',                                value: 'x-api-key'            },
-            { label: 'X-Access-Tokens',       description: 'x-access-tokens: YOUR_KEY (Ask Sage Army native)',   value: 'x-access-tokens'      },
-            { label: 'Anthropic Auth Token',  description: 'ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy)',            value: 'anthropic-auth-token' },
-            { label: 'Basic Auth',            description: 'Authorization: Basic YOUR_KEY',                       value: 'basic'                }
+            { label: 'Bearer Token',        description: 'Authorization: Bearer YOUR_KEY (default)',         value: 'bearer'               },
+            { label: 'API Key Header',       description: 'api-key: YOUR_KEY',                                value: 'api-key'              },
+            { label: 'X-API-Key Header',     description: 'x-api-key: YOUR_KEY',                              value: 'x-api-key'            },
+            { label: 'X-Access-Tokens',      description: 'x-access-tokens: YOUR_KEY (Ask Sage Army native)', value: 'x-access-tokens'      },
+            { label: 'Anthropic Auth Token', description: 'ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy)',          value: 'anthropic-auth-token' },
+            { label: 'Basic Auth',           description: 'Authorization: Basic YOUR_KEY',                    value: 'basic'                }
         ], {
             placeHolder: 'Select authentication type'
         });
@@ -1129,9 +1135,9 @@ function activate(context) {
     // ─────────────────────────────────────────────
     const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
         const action = await vscode.window.showQuickPick([
-            { label: '📂 Browse for PEM file',        value: 'browse' },
-            { label: '🌐 Use NODE_EXTRA_CA_CERTS env', value: 'env'    },
-            { label: '🗑️ Clear PEM certificate',       value: 'clear'  }
+            { label: '📂 Browse for PEM file',         value: 'browse' },
+            { label: '🌐 Use NODE_EXTRA_CA_CERTS env',  value: 'env'    },
+            { label: '🗑️ Clear PEM certificate',        value: 'clear'  }
         ], {
             placeHolder: 'Set or clear PEM certificate'
         });
@@ -1142,24 +1148,16 @@ function activate(context) {
 
         if (action.value === 'clear') {
             await config.update('pemPath', '');
-            vscode.window.showInformationMessage(
-                'PEM Certificate cleared. Will use NODE_EXTRA_CA_CERTS if set.'
-            );
+            vscode.window.showInformationMessage('PEM Certificate cleared. Will use NODE_EXTRA_CA_CERTS if set.');
             return;
         }
 
         if (action.value === 'env') {
             const envPath = process.env.NODE_EXTRA_CA_CERTS;
             if (envPath) {
-                vscode.window.showInformationMessage(
-                    'NODE_EXTRA_CA_CERTS is set to: ' + envPath +
-                    '. The extension will use this automatically.'
-                );
+                vscode.window.showInformationMessage('NODE_EXTRA_CA_CERTS is set to: ' + envPath + '. The extension will use this automatically.');
             } else {
-                vscode.window.showWarningMessage(
-                    'NODE_EXTRA_CA_CERTS is not set. ' +
-                    'Set it in Windows User Environment Variables and restart VSCode.'
-                );
+                vscode.window.showWarningMessage('NODE_EXTRA_CA_CERTS is not set. Set it in Windows User Environment Variables and restart VSCode.');
             }
             return;
         }
@@ -1289,9 +1287,7 @@ function activate(context) {
 
             if (message.command === 'send') {
                 if (!apiKey) {
-                    vscode.window.showErrorMessage(
-                        'No API key found. Run "GenAI.mil: Set API Key" first.'
-                    );
+                    vscode.window.showErrorMessage('No API key found. Run "GenAI.mil: Set API Key" first.');
                     return;
                 }
                 if (!config.endpoint) {
@@ -1369,10 +1365,7 @@ function activate(context) {
                 const saveUri = await vscode.window.showSaveDialog({
                     defaultUri: defaultSaveUri,
                     saveLabel:  'Save Chat History',
-                    filters: {
-                        'Markdown': ['md'],
-                        'Text':     ['txt']
-                    }
+                    filters: { 'Markdown': ['md'], 'Text': ['txt'] }
                 });
 
                 if (saveUri) {
@@ -1393,9 +1386,7 @@ function activate(context) {
                 console.log('  API Key start: ' + (debugKey ? debugKey.substring(0, 8) + '...' : 'N/A'));
                 console.log('  PEM Path:      ' + config.pemPath);
                 console.log('  NODE_EXTRA_CA: ' + (process.env.NODE_EXTRA_CA_CERTS || 'Not set'));
-                vscode.window.showInformationMessage(
-                    'Debug info logged to console (Help > Toggle Developer Tools > Console)'
-                );
+                vscode.window.showInformationMessage('Debug info logged to console (Help > Toggle Developer Tools > Console)');
             }
         });
     });
@@ -1403,9 +1394,7 @@ function activate(context) {
     // ─────────────────────────────────────────────
     // STATUS BAR
     // ─────────────────────────────────────────────
-    const statusBarItem = vscode.window.createStatusBarItem(
-        vscode.StatusBarAlignment.Right, 100
-    );
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.text    = '$(comment-discussion) GenAI Chat';
     statusBarItem.tooltip = 'Open GenAI.mil Chat';
     statusBarItem.command = 'genai-mil.openChat';
@@ -1440,7 +1429,6 @@ function getWebviewContent(chatHistory, loading, config) {
 
         let content = escapeHtml(msg.content);
 
-        // Code blocks with filename
         content = content.replace(
             /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
             function (match, lang, filename, code) {
@@ -1458,7 +1446,6 @@ function getWebviewContent(chatHistory, loading, config) {
             }
         );
 
-        // Regular code blocks
         content = content.replace(
             /```(\w*)\n([\s\S]*?)```/g,
             function (match, lang, code) {
