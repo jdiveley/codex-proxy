@@ -18,15 +18,12 @@ const KNOWN_ENDPOINTS = {
             "gpt-5.1-gov",
             "google-gemini-2.5-flash",
             "google-gemini-2.5-pro",
-            "google-gemini-2.5-flash-image",
             "google-claude-45-sonnet",
             "google-claude-45-haiku",
             "google-claude-45-opus",
             "aws-bedrock-nova-pro-gov",
             "aws-bedrock-nova-micro-gov",
-            "aws-bedrock-nova-lite-gov",
-            "google-imagen-4",
-            "google-veo-3-fast"
+            "aws-bedrock-nova-lite-gov"
         ],
         modelsEndpoint: null
     },
@@ -73,6 +70,44 @@ const KNOWN_ENDPOINTS = {
         modelsEndpoint: "/v1/models"
     }
 };
+
+// ═══════════════════════════════════════════════════════════════
+// MODEL ID TRANSLATION TABLE
+// Ask Sage Army /server/query requires canonical model IDs.
+// The google-claude-* prefixed IDs are display names only.
+//
+
+Source: Pi extension KNOWN_ALIASES map (New5.txt)
+// ═══════════════════════════════════════════════════════════════
+const ASKSAGE_MODEL_IDS = {
+    // Claude models - must use canonical date-suffixed IDs
+    "google-claude-45-sonnet":          "claude-sonnet-4-5-20250929",
+    "google-claude-45-opus":            "claude-opus-4-5-20251101",
+    "google-claude-45-haiku":           "claude-haiku-4-5-20251001",
+    "google-claude-46-sonnet":          "claude-sonnet-4-6",
+    "google-claude-46-opus":            "claude-opus-4-6",
+    "google-claude-47-sonnet":          "claude-sonnet-4-7",
+    "google-claude-47-opus":            "claude-opus-4-7",
+    // GPT gov models - pass through as-is (already correct)
+    "gpt-4.1-gov":                      "gpt-4.1-gov",
+    "gpt-4.1-mini-gov":                 "gpt-4.1-mini-gov",
+    "gpt-5.1-gov":                      "gpt-5.1-gov",
+    // Gemini models - pass through as-is
+    "google-gemini-2.5-flash":          "google-gemini-2.5-flash",
+    "google-gemini-2.5-pro":            "google-gemini-2.5-pro",
+    "google-gemini-2.5-flash-image":    "google-gemini-2.5-flash-image",
+    // Nova models - pass through as-is
+    "aws-bedrock-nova-pro-gov":         "aws-bedrock-nova-pro-gov",
+    "aws-bedrock-nova-micro-gov":       "aws-bedrock-nova-micro-gov",
+    "aws-bedrock-nova-lite-gov":        "aws-bedrock-nova-lite-gov"
+};
+
+// ═══════════════════════════════════════════════════════════════
+// HELPER: Translate display model ID to Ask Sage API model ID
+// ═══════════════════════════════════════════════════════════════
+function translateModelId(modelId) {
+    return ASKSAGE_MODEL_IDS[modelId] || modelId;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Check if endpoint uses Ask Sage Army format
@@ -139,9 +174,7 @@ function getEffectiveAuthType(endpoint, configAuthType) {
 // HELPER: Build auth headers based on auth type
 // ═══════════════════════════════════════════════════════════════
 function getAuthHeaders(apiKey, authType) {
-    const headers = {
-        'Content-Type': 'application/json'
-    };
+    const headers = { 'Content-Type': 'application/json' };
     switch (authType) {
         case 'x-access-tokens':
             headers['x-access-tokens'] = apiKey;
@@ -244,7 +277,6 @@ function httpsGet(endpoint, apiKey, authType, pemPath) {
 // ═══════════════════════════════════════════════════════════════
 function fetchAskSageModels(baseUrl, apiKey, pemPath) {
     return new Promise(function (resolve, reject) {
-
         const endpointsToTry = [
             '/server/get-models',
             '/server/models',
@@ -299,7 +331,6 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
                         tryNext();
                         return;
                     }
-
                     if (res.statusCode < 200 || res.statusCode >= 300) {
                         tryNext();
                         return;
@@ -329,10 +360,8 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
 // ═══════════════════════════════════════════════════════════════
 // HELPER: Ask Sage Army API request
 // POST /server/query
-// Body: { message: "...", model: "..." }
-// Auth: x-access-tokens header
-// Response: { message: "<AI reply>", response: "OK", status: 200 }
-// FIXED: "message" field contains the AI reply, "response" is just "OK"
+// FIXED: Translates display model IDs to canonical API model IDs
+// FIXED: Reads "message" field (not "response") for AI reply
 // ═══════════════════════════════════════════════════════════════
 function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
     let url;
@@ -342,6 +371,11 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         onError(new Error('Invalid endpoint URL: ' + endpoint));
         return;
     }
+
+    // Translate display model ID to canonical Ask Sage API model ID
+    const apiModelId = translateModelId(model);
+    console.log('GenAI.mil: Model display ID: ' + model);
+    console.log('GenAI.mil: Model API ID (translated): ' + apiModelId);
 
     // Build message string from messages array
     let fullMessage = '';
@@ -367,14 +401,12 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
 
     const payload = JSON.stringify({
         message:          fullMessage.trim(),
-        model:            model,
-        limit_references: 0       // from Pi extension - prevents reference injection
+        model:            apiModelId,       // Use translated canonical ID
+        limit_references: 0
     });
 
     console.log('GenAI.mil: Ask Sage Army request to ' + endpoint);
-    console.log('GenAI.mil: Model: ' + model);
-    console.log('GenAI.mil: Payload length: ' + payload.length);
-    console.log('GenAI.mil: API Key length: ' + (apiKey ? apiKey.length : 0));
+    console.log('GenAI.mil: Payload: ' + payload);
     console.log('GenAI.mil: API Key preview: ' + (apiKey ? apiKey.substring(0, 8) + '...' : 'MISSING'));
 
     const options = {
@@ -392,13 +424,13 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
     applyPemCert(options, pemPath);
 
     const req = https.request(options, function (res) {
-        console.log('GenAI.mil: Ask Sage Army response status: ' + res.statusCode);
+        console.log('GenAI.mil: Response status: ' + res.statusCode);
 
         if (res.statusCode < 200 || res.statusCode >= 300) {
             let errorBody = '';
             res.on('data', function (chunk) { errorBody += chunk.toString(); });
             res.on('end', function () {
-                console.log('GenAI.mil: Error response body: ' + errorBody);
+                console.log('GenAI.mil: Error body: ' + errorBody);
                 let errorMsg = 'HTTP ' + res.statusCode + ': ';
                 try {
                     const parsed = JSON.parse(errorBody);
@@ -414,19 +446,16 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         let body = '';
         res.on('data', function (chunk) { body += chunk.toString(); });
         res.on('end', function () {
-            console.log('GenAI.mil: Ask Sage Army raw response: ' + body);
+            console.log('GenAI.mil: Raw response: ' + body);
             try {
                 const parsed = JSON.parse(body);
 
-                // ─────────────────────────────────────────────────────
-                // CRITICAL FIX: Ask Sage Army response format is:
-                //   { "message": "<AI answer>", "response": "OK", "status": 200 }
-                // "response" is always "OK" (a status string), NOT the AI reply.
-                // "message" contains the actual AI-generated text.
-                // Always check "message" first, then fall back to others.
-                // ─────────────────────────────────────────────────────
+                // Ask Sage Army response format:
+                // { "message": "<AI reply>", "response": "OK", "status": 200 }
+                // "message" = actual AI text
+                // "response" = always "OK" (status string, NOT the answer)
                 const responseText =
-                    parsed.message  ||   // ← ACTUAL AI reply (fixed order)
+                    parsed.message  ||
                     parsed.content  ||
                     parsed.text     ||
                     parsed.answer   ||
@@ -434,13 +463,11 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
                     (parsed.response && parsed.response !== 'OK' ? parsed.response : null) ||
                     JSON.stringify(parsed);
 
-                // Check for API-level errors embedded in a 200 response
                 if (parsed.status && parsed.status !== 200) {
-                    onError(new Error('Ask Sage API error (status ' + parsed.status + '): ' + responseText));
+                    onError(new Error('Ask Sage error (status ' + parsed.status + '): ' + responseText));
                     return;
                 }
 
-                // Strip leading newlines (Pi extension does this too)
                 const cleanedText = responseText.replace(/^\n+/, '');
 
                 if (!cleanedText || cleanedText.trim() === '') {
@@ -452,10 +479,8 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
                 onDone();
 
             } catch (e) {
-                console.log('GenAI.mil: Failed to parse response: ' + e.message);
-                onError(new Error(
-                    'Failed to parse Ask Sage response: ' + e.message + ' | Raw: ' + body
-                ));
+                console.log('GenAI.mil: Parse error: ' + e.message);
+                onError(new Error('Failed to parse response: ' + e.message + ' | Raw: ' + body));
             }
         });
 
@@ -574,16 +599,9 @@ function openAIStreamRequest(endpoint, apiKey, model, messages, onData, onDone, 
 // ═══════════════════════════════════════════════════════════════
 function sendRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens) {
     if (isAskSageFormat(endpoint)) {
-        askSageRequest(
-            endpoint, apiKey, model, messages,
-            onData, onDone, onError, pemPath
-        );
+        askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath);
     } else {
-        openAIStreamRequest(
-            endpoint, apiKey, model, messages,
-            onData, onDone, onError,
-            pemPath, authType, temperature, maxTokens
-        );
+        openAIStreamRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath, authType, temperature, maxTokens);
     }
 }
 
@@ -607,8 +625,7 @@ async function writeFileToWorkspace(filename, content, openBeside) {
 
         if (fileExists) {
             const overwrite = await vscode.window.showWarningMessage(
-                'File "' + filename + '" already exists. Overwrite?',
-                'Yes', 'No'
+                'File "' + filename + '" already exists. Overwrite?', 'Yes', 'No'
             );
             if (overwrite !== 'Yes') { return false; }
         }
@@ -620,7 +637,6 @@ async function writeFileToWorkspace(filename, content, openBeside) {
             const doc = await vscode.workspace.openTextDocument(fileUri);
             await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
         }
-
         return true;
 
     } else {
@@ -656,16 +672,13 @@ async function editFileInWorkspace(filename, content) {
     try {
         const doc    = await vscode.workspace.openTextDocument(fileUri);
         const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
-
         const fullRange = new vscode.Range(
             doc.positionAt(0),
             doc.positionAt(doc.getText().length)
         );
-
         await editor.edit(function (editBuilder) {
             editBuilder.replace(fullRange, content);
         });
-
         vscode.window.showInformationMessage('File updated: ' + filename);
         return true;
 
@@ -703,154 +716,92 @@ function activate(context) {
     const secretStorage = context.secrets;
     let activeChatPanel = null;
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set API Key
-    // ─────────────────────────────────────────────
     const setApiKeyCommand = vscode.commands.registerCommand('genai-mil.setApiKey', async function () {
         const config = getConfig();
-
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
-            items.push({
-                label:       KNOWN_ENDPOINTS[url].label,
-                description: url,
-                value:       url
-            });
+            items.push({ label: KNOWN_ENDPOINTS[url].label, description: url, value: url });
         }
         if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
-            items.unshift({
-                label:       'Current Endpoint',
-                description: config.endpoint,
-                value:       config.endpoint
-            });
+            items.unshift({ label: 'Current Endpoint', description: config.endpoint, value: config.endpoint });
         }
-        items.push({
-            label:       '✏️ Enter Custom Endpoint URL',
-            description: 'Set key for a different endpoint',
-            value:       '__custom__'
-        });
+        items.push({ label: '✏️ Enter Custom Endpoint URL', description: 'Set key for a different endpoint', value: '__custom__' });
 
-        const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Which endpoint is this API key for?'
-        });
-
+        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Which endpoint is this API key for?' });
         if (!selected) { return; }
 
         let targetEndpoint = selected.value;
-
         if (targetEndpoint === '__custom__') {
             targetEndpoint = await vscode.window.showInputBox({
-                prompt:         'Enter the endpoint URL this API key is for',
-                placeHolder:    'https://your-api.example.com/v1/chat/completions',
+                prompt: 'Enter the endpoint URL this API key is for',
+                placeHolder: 'https://your-api.example.com/v1/chat/completions',
                 ignoreFocusOut: true,
-                validateInput:  function (value) {
-                    try { new URL(value); return null; }
-                    catch (e) { return 'Please enter a valid URL'; }
+                validateInput: function (value) {
+                    try { new URL(value); return null; } catch (e) { return 'Please enter a valid URL'; }
                 }
             });
             if (!targetEndpoint) { return; }
         }
 
         const apiKey = await vscode.window.showInputBox({
-            prompt:         'Enter the API Key for ' + targetEndpoint,
-            password:       true,
-            placeHolder:    'YOUR_API_KEY',
+            prompt: 'Enter the API Key for ' + targetEndpoint,
+            password: true,
+            placeHolder: 'YOUR_API_KEY',
             ignoreFocusOut: true
         });
 
         if (apiKey) {
             const trimmedKey = apiKey.trim();
-            const secretName = getApiKeySecretName(targetEndpoint);
-            await secretStorage.store(secretName, trimmedKey);
-
+            await secretStorage.store(getApiKeySecretName(targetEndpoint), trimmedKey);
             let hostname = '';
-            try { hostname = new URL(targetEndpoint).hostname; }
-            catch (e) { hostname = targetEndpoint; }
-
-            vscode.window.showInformationMessage(
-                'API Key saved for ' + hostname +
-                ' (' + trimmedKey.length + ' chars)'
-            );
+            try { hostname = new URL(targetEndpoint).hostname; } catch (e) { hostname = targetEndpoint; }
+            vscode.window.showInformationMessage('API Key saved for ' + hostname + ' (' + trimmedKey.length + ' chars)');
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Delete API Key
-    // ─────────────────────────────────────────────
     const deleteApiKeyCommand = vscode.commands.registerCommand('genai-mil.deleteApiKey', async function () {
         const config = getConfig();
-
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
-            items.push({
-                label:       KNOWN_ENDPOINTS[url].label,
-                description: url,
-                value:       url
-            });
+            items.push({ label: KNOWN_ENDPOINTS[url].label, description: url, value: url });
         }
         if (config.endpoint && !KNOWN_ENDPOINTS[config.endpoint]) {
-            items.unshift({
-                label:       'Current Endpoint',
-                description: config.endpoint,
-                value:       config.endpoint
-            });
+            items.unshift({ label: 'Current Endpoint', description: config.endpoint, value: config.endpoint });
         }
 
-        const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Delete API key for which endpoint?'
-        });
-
+        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Delete API key for which endpoint?' });
         if (!selected) { return; }
 
-        const confirm = await vscode.window.showWarningMessage(
-            'Delete API key for ' + selected.description + '?',
-            'Yes', 'No'
-        );
-
+        const confirm = await vscode.window.showWarningMessage('Delete API key for ' + selected.description + '?', 'Yes', 'No');
         if (confirm === 'Yes') {
             await secretStorage.delete(getApiKeySecretName(selected.value));
             vscode.window.showInformationMessage('API Key deleted for ' + selected.description);
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Select Endpoint
-    // ─────────────────────────────────────────────
     const selectEndpointCommand = vscode.commands.registerCommand('genai-mil.selectEndpoint', async function () {
         const items = [];
         for (const url in KNOWN_ENDPOINTS) {
             const known = KNOWN_ENDPOINTS[url];
             items.push({
-                label:       known.label,
-                description: url,
-                detail:      known.apiFormat === 'asksage'
-                    ? '🏛️ Ask Sage Army Format | Auth: ' + known.authType
-                    : '🔵 OpenAI Compatible | Auth: ' + known.authType,
-                value:       url
+                label: known.label, description: url,
+                detail: known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army Format | Auth: ' + known.authType : '🔵 OpenAI Compatible | Auth: ' + known.authType,
+                value: url
             });
         }
-        items.push({
-            label:       '✏️ Enter Custom Endpoint',
-            description: 'Type in a custom API URL',
-            value:       '__custom__'
-        });
+        items.push({ label: '✏️ Enter Custom Endpoint', description: 'Type in a custom API URL', value: '__custom__' });
 
-        const selected = await vscode.window.showQuickPick(items, {
-            placeHolder: 'Select API Endpoint'
-        });
-
+        const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select API Endpoint' });
         if (!selected) { return; }
 
         let endpointUrl = selected.value;
-
         if (endpointUrl === '__custom__') {
             endpointUrl = await vscode.window.showInputBox({
-                prompt:         'Enter the full API endpoint URL',
-                placeHolder:    'https://your-api.example.com/v1/chat/completions',
+                prompt: 'Enter the full API endpoint URL',
+                placeHolder: 'https://your-api.example.com/v1/chat/completions',
                 ignoreFocusOut: true,
-                validateInput:  function (value) {
-                    try { new URL(value); return null; }
-                    catch (e) { return 'Please enter a valid URL'; }
+                validateInput: function (value) {
+                    try { new URL(value); return null; } catch (e) { return 'Please enter a valid URL'; }
                 }
             });
             if (!endpointUrl) { return; }
@@ -861,87 +812,53 @@ function activate(context) {
 
         const known = KNOWN_ENDPOINTS[endpointUrl];
         if (known) {
-            if (known.authType) {
-                await config.update('authType', known.authType);
-            }
+            if (known.authType) { await config.update('authType', known.authType); }
             if (known.defaultModel) {
                 await config.update('model', known.defaultModel);
-                vscode.window.showInformationMessage(
-                    'Endpoint: ' + known.label +
-                    ' | Model: ' + known.defaultModel +
-                    ' | Auth: ' + (known.authType || 'bearer')
-                );
+                vscode.window.showInformationMessage('Endpoint: ' + known.label + ' | Model: ' + known.defaultModel + ' | Auth: ' + (known.authType || 'bearer'));
             }
         } else {
-            const modelName = await vscode.window.showInputBox({
-                prompt:         'Enter the model name for this endpoint',
-                placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
-                ignoreFocusOut: true
-            });
+            const modelName = await vscode.window.showInputBox({ prompt: 'Enter the model name for this endpoint', placeHolder: 'e.g., gpt-4o, gemini-2.5-flash', ignoreFocusOut: true });
             if (modelName) {
                 await config.update('model', modelName.trim());
-                vscode.window.showInformationMessage(
-                    'Endpoint: ' + endpointUrl + ' | Model: ' + modelName.trim()
-                );
+                vscode.window.showInformationMessage('Endpoint: ' + endpointUrl + ' | Model: ' + modelName.trim());
             }
         }
 
         const existingKey = await secretStorage.get(getApiKeySecretName(endpointUrl));
         if (!existingKey) {
-            const setKey = await vscode.window.showWarningMessage(
-                'No API key found for this endpoint. Set one now?',
-                'Yes', 'Later'
-            );
-            if (setKey === 'Yes') {
-                await vscode.commands.executeCommand('genai-mil.setApiKey');
-            }
+            const setKey = await vscode.window.showWarningMessage('No API key found for this endpoint. Set one now?', 'Yes', 'Later');
+            if (setKey === 'Yes') { await vscode.commands.executeCommand('genai-mil.setApiKey'); }
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Select Model
-    // ─────────────────────────────────────────────
     const selectModelCommand = vscode.commands.registerCommand('genai-mil.selectModel', async function () {
         const config = getConfig();
         const known  = KNOWN_ENDPOINTS[config.endpoint];
 
         if (known && known.models && known.models.length > 0) {
             const items = known.models.map(function (m) {
-                return {
-                    label:       m,
-                    description: m === config.model ? '(current)' : (m === known.defaultModel ? '(default)' : '')
-                };
+                // Show translated ID as description so user knows what is sent to API
+                const apiId = translateModelId(m);
+                const desc  = m === config.model ? '(current)' : (m === known.defaultModel ? '(default)' : '');
+                const detail = apiId !== m ? '→ API: ' + apiId : '';
+                return { label: m, description: desc, detail: detail };
             });
 
             if (known.modelsEndpoint || isAskSageFormat(config.endpoint)) {
-                items.unshift({
-                    label:       '🔄 Fetch Latest Models from API',
-                    description: 'Query the API for available models'
-                });
+                items.unshift({ label: '🔄 Fetch Latest Models from API', description: 'Query the API for available models' });
             }
+            items.push({ label: '✏️ Enter Custom Model', description: 'Type in a custom model name' });
 
-            items.push({
-                label:       '✏️ Enter Custom Model',
-                description: 'Type in a custom model name'
-            });
-
-            const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Select a model for ' + (known.label || config.endpoint)
-            });
-
+            const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select a model for ' + (known.label || config.endpoint) });
             if (!selected) { return; }
 
             if (selected.label === '🔄 Fetch Latest Models from API') {
                 await vscode.commands.executeCommand('genai-mil.fetchModels');
                 return;
             }
-
             if (selected.label === '✏️ Enter Custom Model') {
-                const customModel = await vscode.window.showInputBox({
-                    prompt:         'Enter the model name',
-                    placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
-                    ignoreFocusOut: true
-                });
+                const customModel = await vscode.window.showInputBox({ prompt: 'Enter the model name', placeHolder: 'e.g., gpt-4o, gemini-2.5-flash', ignoreFocusOut: true });
                 if (customModel) {
                     await config.update('model', customModel.trim());
                     vscode.window.showInformationMessage('Model set to: ' + customModel.trim());
@@ -952,12 +869,7 @@ function activate(context) {
             }
 
         } else {
-            const customModel = await vscode.window.showInputBox({
-                prompt:         'Enter the model name for ' + config.endpoint,
-                placeHolder:    'e.g., gpt-4o, gemini-2.5-flash',
-                value:          config.model,
-                ignoreFocusOut: true
-            });
+            const customModel = await vscode.window.showInputBox({ prompt: 'Enter the model name for ' + config.endpoint, placeHolder: 'e.g., gpt-4o, gemini-2.5-flash', value: config.model, ignoreFocusOut: true });
             if (customModel) {
                 await config.update('model', customModel.trim());
                 vscode.window.showInformationMessage('Model set to: ' + customModel.trim());
@@ -965,14 +877,10 @@ function activate(context) {
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Fetch Available Models from API
-    // ─────────────────────────────────────────────
     const fetchModelsCommand = vscode.commands.registerCommand('genai-mil.fetchModels', async function () {
         const config     = getConfig();
         const known      = KNOWN_ENDPOINTS[config.endpoint];
-        const secretName = getApiKeySecretName(config.endpoint);
-        const apiKey     = await secretStorage.get(secretName);
+        const apiKey     = await secretStorage.get(getApiKeySecretName(config.endpoint));
 
         if (!apiKey) {
             vscode.window.showErrorMessage('No API key found. Set one first with "GenAI.mil: Set API Key".');
@@ -981,76 +889,47 @@ function activate(context) {
 
         if (isAskSageFormat(config.endpoint)) {
             await vscode.window.withProgress({
-                location:    vscode.ProgressLocation.Notification,
-                title:       'Fetching models from Ask Sage Army...',
+                location: vscode.ProgressLocation.Notification,
+                title: 'Fetching models from Ask Sage Army...',
                 cancellable: false
             }, async function () {
                 try {
                     const baseUrl = getBaseUrl(config.endpoint);
                     const result  = await fetchAskSageModels(baseUrl, apiKey, config.pemPath);
 
-                    console.log('GenAI.mil: Models found at: ' + result.path);
-                    console.log('GenAI.mil: Raw models data: ' + JSON.stringify(result.data));
-
                     let models = [];
                     const data = result.data;
 
                     if (Array.isArray(data)) {
-                        models = data.map(function (m) {
-                            if (typeof m === 'string') { return m; }
-                            return m.id || m.name || m.model || JSON.stringify(m);
-                        });
+                        models = data.map(function (m) { return typeof m === 'string' ? m : (m.id || m.name || m.model || JSON.stringify(m)); });
                     } else if (data.models && Array.isArray(data.models)) {
-                        models = data.models.map(function (m) {
-                            if (typeof m === 'string') { return m; }
-                            return m.id || m.name || m.model || JSON.stringify(m);
-                        });
+                        models = data.models.map(function (m) { return typeof m === 'string' ? m : (m.id || m.name || m.model || JSON.stringify(m)); });
                     } else if (data.data && Array.isArray(data.data)) {
-                        models = data.data.map(function (m) {
-                            if (typeof m === 'string') { return m; }
-                            return m.id || m.name || m.model || JSON.stringify(m);
-                        });
+                        models = data.data.map(function (m) { return typeof m === 'string' ? m : (m.id || m.name || m.model || JSON.stringify(m)); });
                     } else if (data.response && Array.isArray(data.response)) {
-                        models = data.response.map(function (m) {
-                            if (typeof m === 'string') { return m; }
-                            return m.id || m.name || m.model || JSON.stringify(m);
-                        });
+                        models = data.response.map(function (m) { return typeof m === 'string' ? m : (m.id || m.name || m.model || JSON.stringify(m)); });
                     } else {
-                        vscode.window.showWarningMessage('Unknown models response format. Check Developer Tools Console for raw data.');
-                        console.log('GenAI.mil: Unknown format: ' + JSON.stringify(data));
+                        vscode.window.showWarningMessage('Unknown models response format.');
                         return;
                     }
 
-                    if (models.length === 0) {
-                        vscode.window.showWarningMessage('No models returned from Ask Sage Army API.');
-                        return;
-                    }
+                    if (models.length === 0) { vscode.window.showWarningMessage('No models returned.'); return; }
 
-                    models = models
-                        .filter(function (m) { return m && m.length > 0; })
-                        .filter(function (m, i, arr) { return arr.indexOf(m) === i; })
-                        .sort();
-
+                    models = models.filter(function (m) { return m && m.length > 0; }).filter(function (m, i, arr) { return arr.indexOf(m) === i; }).sort();
                     if (known) { known.models = models; }
 
                     const items = models.map(function (m) {
-                        return {
-                            label:       m,
-                            description: m === config.model ? '(current)' : ''
-                        };
+                        const apiId = translateModelId(m);
+                        return { label: m, description: m === config.model ? '(current)' : '', detail: apiId !== m ? '→ API: ' + apiId : '' };
                     });
 
-                    const selected = await vscode.window.showQuickPick(items, {
-                        placeHolder: 'Select a model (' + models.length + ' available from API)'
-                    });
-
+                    const selected = await vscode.window.showQuickPick(items, { placeHolder: 'Select a model (' + models.length + ' available from API)' });
                     if (selected) {
                         await config.update('model', selected.label);
                         vscode.window.showInformationMessage('Model set to: ' + selected.label);
                     }
 
                 } catch (error) {
-                    console.log('GenAI.mil: fetchAskSageModels error: ' + error.message);
                     vscode.window.showErrorMessage('Could not fetch models: ' + error.message + ' — Using pre-configured list instead.');
                     await vscode.commands.executeCommand('genai-mil.selectModel');
                 }
@@ -1065,63 +944,38 @@ function activate(context) {
 
         try {
             await vscode.window.withProgress({
-                location:    vscode.ProgressLocation.Notification,
-                title:       'Fetching models from ' + modelsUrl + '...',
+                location: vscode.ProgressLocation.Notification,
+                title: 'Fetching models from ' + modelsUrl + '...',
                 cancellable: false
             }, async function () {
                 const response = await httpsGet(modelsUrl, apiKey, authType, config.pemPath);
-
                 let models = [];
                 if (response && response.data && Array.isArray(response.data)) {
-                    models = response.data.map(function (m) {
-                        return {
-                            label:       m.id || m.name || m,
-                            description: m.owned_by ? 'by ' + m.owned_by : ''
-                        };
-                    });
+                    models = response.data.map(function (m) { return { label: m.id || m.name || m, description: m.owned_by ? 'by ' + m.owned_by : '' }; });
                 } else if (Array.isArray(response)) {
-                    models = response.map(function (m) {
-                        return {
-                            label:       typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m)),
-                            description: ''
-                        };
-                    });
+                    models = response.map(function (m) { return { label: typeof m === 'string' ? m : (m.id || m.name || JSON.stringify(m)), description: '' }; });
                 }
-
-                if (models.length === 0) {
-                    vscode.window.showWarningMessage('No models returned from the API.');
-                    return;
-                }
-
-                const selected = await vscode.window.showQuickPick(models, {
-                    placeHolder: 'Select a model (' + models.length + ' available)'
-                });
-
+                if (models.length === 0) { vscode.window.showWarningMessage('No models returned from the API.'); return; }
+                const selected = await vscode.window.showQuickPick(models, { placeHolder: 'Select a model (' + models.length + ' available)' });
                 if (selected) {
                     await config.update('model', selected.label);
                     vscode.window.showInformationMessage('Model set to: ' + selected.label);
                 }
             });
-
         } catch (error) {
             vscode.window.showErrorMessage('Failed to fetch models: ' + error.message);
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set Auth Type
-    // ─────────────────────────────────────────────
     const setAuthTypeCommand = vscode.commands.registerCommand('genai-mil.setAuthType', async function () {
         const selected = await vscode.window.showQuickPick([
-            { label: 'Bearer Token',        description: 'Authorization: Bearer YOUR_KEY (default)',         value: 'bearer'               },
-            { label: 'API Key Header',       description: 'api-key: YOUR_KEY',                                value: 'api-key'              },
-            { label: 'X-API-Key Header',     description: 'x-api-key: YOUR_KEY',                              value: 'x-api-key'            },
-            { label: 'X-Access-Tokens',      description: 'x-access-tokens: YOUR_KEY (Ask Sage Army native)', value: 'x-access-tokens'      },
-            { label: 'Anthropic Auth Token', description: 'ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy)',          value: 'anthropic-auth-token' },
-            { label: 'Basic Auth',           description: 'Authorization: Basic YOUR_KEY',                    value: 'basic'                }
-        ], {
-            placeHolder: 'Select authentication type'
-        });
+            { label: 'Bearer Token',        description: 'Authorization: Bearer YOUR_KEY',                  value: 'bearer'               },
+            { label: 'API Key Header',       description: 'api-key: YOUR_KEY',                               value: 'api-key'              },
+            { label: 'X-API-Key Header',     description: 'x-api-key: YOUR_KEY',                             value: 'x-api-key'            },
+            { label: 'X-Access-Tokens',      description: 'x-access-tokens: YOUR_KEY (Ask Sage Army native)',value: 'x-access-tokens'      },
+            { label: 'Anthropic Auth Token', description: 'ANTHROPIC_AUTH_TOKEN: YOUR_KEY (legacy)',         value: 'anthropic-auth-token' },
+            { label: 'Basic Auth',           description: 'Authorization: Basic YOUR_KEY',                   value: 'basic'                }
+        ], { placeHolder: 'Select authentication type' });
 
         if (selected) {
             const config = getConfig();
@@ -1130,32 +984,25 @@ function activate(context) {
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Set PEM Certificate
-    // ─────────────────────────────────────────────
     const setPemCertCommand = vscode.commands.registerCommand('genai-mil.setPemCert', async function () {
         const action = await vscode.window.showQuickPick([
-            { label: '📂 Browse for PEM file',         value: 'browse' },
-            { label: '🌐 Use NODE_EXTRA_CA_CERTS env',  value: 'env'    },
-            { label: '🗑️ Clear PEM certificate',        value: 'clear'  }
-        ], {
-            placeHolder: 'Set or clear PEM certificate'
-        });
+            { label: '📂 Browse for PEM file',        value: 'browse' },
+            { label: '🌐 Use NODE_EXTRA_CA_CERTS env', value: 'env'    },
+            { label: '🗑️ Clear PEM certificate',       value: 'clear'  }
+        ], { placeHolder: 'Set or clear PEM certificate' });
 
         if (!action) { return; }
-
         const config = getConfig();
 
         if (action.value === 'clear') {
             await config.update('pemPath', '');
-            vscode.window.showInformationMessage('PEM Certificate cleared. Will use NODE_EXTRA_CA_CERTS if set.');
+            vscode.window.showInformationMessage('PEM Certificate cleared.');
             return;
         }
-
         if (action.value === 'env') {
             const envPath = process.env.NODE_EXTRA_CA_CERTS;
             if (envPath) {
-                vscode.window.showInformationMessage('NODE_EXTRA_CA_CERTS is set to: ' + envPath + '. The extension will use this automatically.');
+                vscode.window.showInformationMessage('NODE_EXTRA_CA_CERTS is set to: ' + envPath);
             } else {
                 vscode.window.showWarningMessage('NODE_EXTRA_CA_CERTS is not set. Set it in Windows User Environment Variables and restart VSCode.');
             }
@@ -1163,13 +1010,8 @@ function activate(context) {
         }
 
         const fileUri = await vscode.window.showOpenDialog({
-            canSelectFiles:   true,
-            canSelectFolders: false,
-            canSelectMany:    false,
-            filters: {
-                'PEM Certificate': ['pem', 'crt', 'cer'],
-                'All Files':       ['*']
-            },
+            canSelectFiles: true, canSelectFolders: false, canSelectMany: false,
+            filters: { 'PEM Certificate': ['pem', 'crt', 'cer'], 'All Files': ['*'] },
             openLabel: 'Select PEM Certificate'
         });
 
@@ -1185,34 +1027,29 @@ function activate(context) {
         }
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Show Current Settings
-    // ─────────────────────────────────────────────
     const showSettingsCommand = vscode.commands.registerCommand('genai-mil.showSettings', async function () {
-        const config     = getConfig();
-        const known      = KNOWN_ENDPOINTS[config.endpoint];
-        const secretName = getApiKeySecretName(config.endpoint);
-        const apiKey     = await secretStorage.get(secretName);
-        const authType   = getEffectiveAuthType(config.endpoint, config.authType);
-        const envPem     = process.env.NODE_EXTRA_CA_CERTS;
+        const config   = getConfig();
+        const known    = KNOWN_ENDPOINTS[config.endpoint];
+        const apiKey   = await secretStorage.get(getApiKeySecretName(config.endpoint));
+        const authType = getEffectiveAuthType(config.endpoint, config.authType);
+        const envPem   = process.env.NODE_EXTRA_CA_CERTS;
+        const apiModelId = translateModelId(config.model);
 
         let hostname = '';
-        try { hostname = new URL(config.endpoint).hostname; }
-        catch (e) { hostname = config.endpoint; }
+        try { hostname = new URL(config.endpoint).hostname; } catch (e) { hostname = config.endpoint; }
 
         const info = [
             '═══ GenAI.mil Extension Settings ═══',
-            'Endpoint:    ' + (config.endpoint || 'Not set'),
-            'Format:      ' + (known ? known.apiFormat.toUpperCase() : 'Unknown/Custom'),
-            'Model:       ' + (config.model    || 'Not set'),
-            'Auth Type:   ' + authType,
-            'Temperature: ' + config.temperature,
-            'Max Tokens:  ' + config.maxTokens,
+            'Endpoint:      ' + (config.endpoint || 'Not set'),
+            'Format:        ' + (known ? known.apiFormat.toUpperCase() : 'Unknown/Custom'),
+            'Model:         ' + (config.model || 'Not set'),
+            'API Model ID:  ' + apiModelId + (apiModelId !== config.model ? ' (translated)' : ''),
+            'Auth Type:     ' + authType,
+            'Temperature:   ' + config.temperature,
+            'Max Tokens:    ' + config.maxTokens,
             '',
             '═══ Security ═══',
-            'API Key (' + hostname + '): ' + (apiKey
-                ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)'
-                : 'Not set'),
+            'API Key (' + hostname + '): ' + (apiKey ? '****' + apiKey.slice(-4) + ' (' + apiKey.length + ' chars)' : 'Not set'),
             'Key Storage:         OS Credential Manager (encrypted)',
             'PEM Cert:            ' + (config.pemPath || 'Not set'),
             'NODE_EXTRA_CA_CERTS: ' + (envPem || 'Not set')
@@ -1221,9 +1058,6 @@ function activate(context) {
         vscode.window.showInformationMessage(info, { modal: true });
     });
 
-    // ─────────────────────────────────────────────
-    // COMMAND: Open Chat
-    // ─────────────────────────────────────────────
     const openChatCommand = vscode.commands.registerCommand('genai-mil.openChat', function () {
         if (activeChatPanel) {
             activeChatPanel.reveal(vscode.ViewColumn.One);
@@ -1231,14 +1065,8 @@ function activate(context) {
         }
 
         const panel = vscode.window.createWebviewPanel(
-            'genaiMilChat',
-            'GenAI.mil Chat',
-            vscode.ViewColumn.One,
-            {
-                enableScripts:           true,
-                retainContextWhenHidden: true,
-                localResourceRoots:      []
-            }
+            'genaiMilChat', 'GenAI.mil Chat', vscode.ViewColumn.One,
+            { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [] }
         );
 
         activeChatPanel = panel;
@@ -1250,67 +1078,31 @@ function activate(context) {
         }
 
         refreshWebview(false);
-
-        panel.onDidDispose(function () {
-            activeChatPanel = null;
-        });
+        panel.onDidDispose(function () { activeChatPanel = null; });
 
         panel.webview.onDidReceiveMessage(async function (message) {
-            const config     = getConfig();
-            const secretName = getApiKeySecretName(config.endpoint);
-            const apiKey     = await secretStorage.get(secretName);
-            const authType   = getEffectiveAuthType(config.endpoint, config.authType);
+            const config   = getConfig();
+            const apiKey   = await secretStorage.get(getApiKeySecretName(config.endpoint));
+            const authType = getEffectiveAuthType(config.endpoint, config.authType);
 
-            if (message.command === 'clearChat') {
-                chatHistory = [];
-                refreshWebview(false);
-                return;
-            }
-
-            if (message.command === 'changeModel') {
-                await vscode.commands.executeCommand('genai-mil.selectModel');
-                refreshWebview(false);
-                return;
-            }
-
-            if (message.command === 'changeEndpoint') {
-                await vscode.commands.executeCommand('genai-mil.selectEndpoint');
-                refreshWebview(false);
-                return;
-            }
-
-            if (message.command === 'fetchModels') {
-                await vscode.commands.executeCommand('genai-mil.fetchModels');
-                refreshWebview(false);
-                return;
-            }
+            if (message.command === 'clearChat')      { chatHistory = []; refreshWebview(false); return; }
+            if (message.command === 'changeModel')    { await vscode.commands.executeCommand('genai-mil.selectModel');   refreshWebview(false); return; }
+            if (message.command === 'changeEndpoint') { await vscode.commands.executeCommand('genai-mil.selectEndpoint'); refreshWebview(false); return; }
+            if (message.command === 'fetchModels')    { await vscode.commands.executeCommand('genai-mil.fetchModels');   refreshWebview(false); return; }
 
             if (message.command === 'send') {
-                if (!apiKey) {
-                    vscode.window.showErrorMessage('No API key found. Run "GenAI.mil: Set API Key" first.');
-                    return;
-                }
-                if (!config.endpoint) {
-                    vscode.window.showErrorMessage('Endpoint not set. Run "GenAI.mil: Select Endpoint" first.');
-                    return;
-                }
-                if (!config.model) {
-                    vscode.window.showErrorMessage('Model not set. Run "GenAI.mil: Select Model" first.');
-                    return;
-                }
+                if (!apiKey)          { vscode.window.showErrorMessage('No API key found. Run "GenAI.mil: Set API Key" first.'); return; }
+                if (!config.endpoint) { vscode.window.showErrorMessage('Endpoint not set. Run "GenAI.mil: Select Endpoint" first.'); return; }
+                if (!config.model)    { vscode.window.showErrorMessage('Model not set. Run "GenAI.mil: Select Model" first.'); return; }
 
-                const userMessage = message.text;
-                chatHistory.push({ role: 'user', content: userMessage });
+                chatHistory.push({ role: 'user', content: message.text });
                 refreshWebview(true);
 
                 const apiMessages = [SYSTEM_PROMPT].concat(chatHistory);
                 let aiMessage = '';
 
                 sendRequest(
-                    config.endpoint,
-                    apiKey,
-                    config.model,
-                    apiMessages,
+                    config.endpoint, apiKey, config.model, apiMessages,
                     function (content) {
                         aiMessage += content;
                         panel.webview.postMessage({ command: 'stream', text: aiMessage });
@@ -1324,27 +1116,17 @@ function activate(context) {
                         refreshWebview(false);
                         vscode.window.showErrorMessage('GenAI.mil Error: ' + error.message);
                     },
-                    config.pemPath,
-                    authType,
-                    config.temperature,
-                    config.maxTokens
+                    config.pemPath, authType, config.temperature, config.maxTokens
                 );
             }
 
-            if (message.command === 'createFile') {
-                await writeFileToWorkspace(message.filename, message.content, true);
-            }
-
-            if (message.command === 'editFile') {
-                await editFileInWorkspace(message.filename, message.content);
-            }
+            if (message.command === 'createFile')     { await writeFileToWorkspace(message.filename, message.content, true); }
+            if (message.command === 'editFile')        { await editFileInWorkspace(message.filename, message.content); }
 
             if (message.command === 'insertAtCursor') {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor) {
-                    await activeEditor.edit(function (editBuilder) {
-                        editBuilder.insert(activeEditor.selection.active, message.content);
-                    });
+                    await activeEditor.edit(function (editBuilder) { editBuilder.insert(activeEditor.selection.active, message.content); });
                     vscode.window.showInformationMessage('Code inserted at cursor');
                 } else {
                     vscode.window.showErrorMessage('No active editor. Open a file first.');
@@ -1357,20 +1139,12 @@ function activate(context) {
                     const who = chatHistory[j].role === 'user' ? '## You' : '## GenAI';
                     chatContent += who + '\n\n' + chatHistory[j].content + '\n\n---\n\n';
                 }
-
                 const defaultSaveUri = vscode.workspace.workspaceFolders
                     ? vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, 'chat-history.md')
                     : undefined;
-
-                const saveUri = await vscode.window.showSaveDialog({
-                    defaultUri: defaultSaveUri,
-                    saveLabel:  'Save Chat History',
-                    filters: { 'Markdown': ['md'], 'Text': ['txt'] }
-                });
-
+                const saveUri = await vscode.window.showSaveDialog({ defaultUri: defaultSaveUri, saveLabel: 'Save Chat History', filters: { 'Markdown': ['md'], 'Text': ['txt'] } });
                 if (saveUri) {
-                    const encoder = new TextEncoder();
-                    await vscode.workspace.fs.writeFile(saveUri, encoder.encode(chatContent));
+                    await vscode.workspace.fs.writeFile(saveUri, new TextEncoder().encode(chatContent));
                     vscode.window.showInformationMessage('Chat saved to ' + saveUri.fsPath);
                 }
             }
@@ -1378,22 +1152,20 @@ function activate(context) {
             if (message.command === 'debugApiKey') {
                 const debugKey = await secretStorage.get(getApiKeySecretName(config.endpoint));
                 console.log('GenAI.mil DEBUG:');
-                console.log('  Endpoint:      ' + config.endpoint);
-                console.log('  Model:         ' + config.model);
-                console.log('  Auth Type:     ' + authType);
-                console.log('  API Key set:   ' + (debugKey ? 'YES' : 'NO'));
-                console.log('  API Key len:   ' + (debugKey ? debugKey.length : 0));
-                console.log('  API Key start: ' + (debugKey ? debugKey.substring(0, 8) + '...' : 'N/A'));
-                console.log('  PEM Path:      ' + config.pemPath);
-                console.log('  NODE_EXTRA_CA: ' + (process.env.NODE_EXTRA_CA_CERTS || 'Not set'));
+                console.log('  Endpoint:        ' + config.endpoint);
+                console.log('  Model (display): ' + config.model);
+                console.log('  Model (API ID):  ' + translateModelId(config.model));
+                console.log('  Auth Type:       ' + authType);
+                console.log('  API Key set:     ' + (debugKey ? 'YES' : 'NO'));
+                console.log('  API Key len:     ' + (debugKey ? debugKey.length : 0));
+                console.log('  API Key start:   ' + (debugKey ? debugKey.substring(0, 8) + '...' : 'N/A'));
+                console.log('  PEM Path:        ' + config.pemPath);
+                console.log('  NODE_EXTRA_CA:   ' + (process.env.NODE_EXTRA_CA_CERTS || 'Not set'));
                 vscode.window.showInformationMessage('Debug info logged to console (Help > Toggle Developer Tools > Console)');
             }
         });
     });
 
-    // ─────────────────────────────────────────────
-    // STATUS BAR
-    // ─────────────────────────────────────────────
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.text    = '$(comment-discussion) GenAI Chat';
     statusBarItem.tooltip = 'Open GenAI.mil Chat';
@@ -1402,15 +1174,9 @@ function activate(context) {
     context.subscriptions.push(statusBarItem);
 
     context.subscriptions.push(
-        setApiKeyCommand,
-        deleteApiKeyCommand,
-        selectEndpointCommand,
-        selectModelCommand,
-        fetchModelsCommand,
-        setAuthTypeCommand,
-        setPemCertCommand,
-        showSettingsCommand,
-        openChatCommand
+        setApiKeyCommand, deleteApiKeyCommand, selectEndpointCommand,
+        selectModelCommand, fetchModelsCommand, setAuthTypeCommand,
+        setPemCertCommand, showSettingsCommand, openChatCommand
     );
 }
 
@@ -1429,43 +1195,25 @@ function getWebviewContent(chatHistory, loading, config) {
 
         let content = escapeHtml(msg.content);
 
-        content = content.replace(
-            /```(\w+):([^\n]+)\n([\s\S]*?)```/g,
-            function (match, lang, filename, code) {
-                const safeFilename = filename.trim();
-                return '<div class="code-block">' +
-                    '<div class="code-header">' +
-                    '<span>📄 ' + safeFilename + ' (' + lang + ')</span>' +
-                    '<div class="code-actions">' +
-                    '<button class="code-btn" data-filename="' + safeFilename + '" data-action="create">💾 Create File</button>' +
-                    '<button class="code-btn" data-filename="' + safeFilename + '" data-action="edit">✏️ Apply Edit</button>' +
-                    '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
-                    '</div></div>' +
-                    '<pre><code>' + code + '</code></pre>' +
-                    '</div>';
-            }
-        );
+        content = content.replace(/```(\w+):([^\n]+)\n([\s\S]*?)```/g, function (match, lang, filename, code) {
+            const safeFilename = filename.trim();
+            return '<div class="code-block"><div class="code-header"><span>📄 ' + safeFilename + ' (' + lang + ')</span><div class="code-actions">' +
+                '<button class="code-btn" data-filename="' + safeFilename + '" data-action="create">💾 Create File</button>' +
+                '<button class="code-btn" data-filename="' + safeFilename + '" data-action="edit">✏️ Apply Edit</button>' +
+                '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
+                '</div></div><pre><code>' + code + '</code></pre></div>';
+        });
 
-        content = content.replace(
-            /```(\w*)\n([\s\S]*?)```/g,
-            function (match, lang, code) {
-                return '<div class="code-block">' +
-                    '<div class="code-header">' +
-                    '<span>Code' + (lang ? ' (' + lang + ')' : '') + '</span>' +
-                    '<div class="code-actions">' +
-                    '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
-                    '</div></div>' +
-                    '<pre><code>' + code + '</code></pre>' +
-                    '</div>';
-            }
-        );
+        content = content.replace(/```(\w*)\n([\s\S]*?)```/g, function (match, lang, code) {
+            return '<div class="code-block"><div class="code-header"><span>Code' + (lang ? ' (' + lang + ')' : '') + '</span><div class="code-actions">' +
+                '<button class="code-btn" data-action="insert">📋 Insert at Cursor</button>' +
+                '</div></div><pre><code>' + code + '</code></pre></div>';
+        });
 
         content = content.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
         content = content.replace(/\n/g, '<br>');
 
-        chatHtml += '<div class="' + msgClass + '">' +
-            '<b>' + icon + ' ' + who + ':</b><br>' + content +
-            '</div>';
+        chatHtml += '<div class="' + msgClass + '"><b>' + icon + ' ' + who + ':</b><br>' + content + '</div>';
     }
 
     if (loading) {
@@ -1475,15 +1223,12 @@ function getWebviewContent(chatHistory, loading, config) {
     const known          = KNOWN_ENDPOINTS[config.endpoint];
     const statusEndpoint = known ? known.label : (config.endpoint || 'Not set');
     const statusModel    = config.model || 'Not set';
-    const statusFormat   = known
-        ? (known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army' : '🔵 OpenAI')
-        : '❓ Custom';
-    const certStatus     = process.env.NODE_EXTRA_CA_CERTS
-        ? '🔒 DoD Cert ✅'
-        : (config.pemPath ? '🔒 PEM Set ✅' : '⚠️ No Cert');
+    const apiModelId     = translateModelId(config.model);
+    const modelDisplay   = apiModelId !== config.model ? statusModel + ' → ' + apiModelId : statusModel;
+    const statusFormat   = known ? (known.apiFormat === 'asksage' ? '🏛️ Ask Sage Army' : '🔵 OpenAI') : '❓ Custom';
+    const certStatus     = process.env.NODE_EXTRA_CA_CERTS ? '🔒 DoD Cert ✅' : (config.pemPath ? '🔒 PEM Set ✅' : '⚠️ No Cert');
 
-    return '<!DOCTYPE html>' +
-        '<html lang="en"><head><meta charset="UTF-8"><style>' +
+    return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><style>' +
         'body{font-family:var(--vscode-font-family,"Segoe UI",Arial,sans-serif);font-size:var(--vscode-font-size,13px);margin:0;padding:0;background:var(--vscode-editor-background,#1e1e1e);color:var(--vscode-editor-foreground,#cccccc);}' +
         '.container{display:flex;flex-direction:column;height:100vh;padding:12px;box-sizing:border-box;}' +
         'h2{margin:0 0 4px 0;color:var(--vscode-textLink-foreground,#3794ff);font-size:16px;}' +
@@ -1515,21 +1260,18 @@ function getWebviewContent(chatHistory, loading, config) {
         '#form button{padding:10px 20px;font-size:14px;cursor:pointer;border:none;border-radius:6px;background:var(--vscode-button-background,#0e639c);color:var(--vscode-button-foreground,#ffffff);}' +
         '#form button:hover{background:var(--vscode-button-hoverBackground,#1177bb);}' +
         '.empty-state{color:var(--vscode-descriptionForeground,#999);text-align:center;padding:40px;font-size:14px;}' +
-        '#chat::-webkit-scrollbar{width:10px;}' +
-        '#chat::-webkit-scrollbar-track{background:transparent;}' +
+        '#chat::-webkit-scrollbar{width:10px;}#chat::-webkit-scrollbar-track{background:transparent;}' +
         '#chat::-webkit-scrollbar-thumb{background:var(--vscode-scrollbarSlider-background,#79797966);border-radius:5px;}' +
         '#chat::-webkit-scrollbar-thumb:hover{background:var(--vscode-scrollbarSlider-hoverBackground,#646464b3);}' +
         '</style></head><body>' +
         '<div class="container">' +
         '<h2>🤖 GenAI.mil Chat</h2>' +
-        '<div class="status-bar">' +
-        '<div class="status-info">' +
+        '<div class="status-bar"><div class="status-info">' +
         '<span>🌐 ' + escapeHtml(statusEndpoint) + '</span>' +
-        '<span>🤖 ' + escapeHtml(statusModel) + '</span>' +
+        '<span>🤖 ' + escapeHtml(modelDisplay) + '</span>' +
         '<span>' + statusFormat + '</span>' +
         '<span>' + certStatus + '</span>' +
-        '</div>' +
-        '<div class="status-actions">' +
+        '</div><div class="status-actions">' +
         '<button class="status-btn" id="changeModelBtn">Change Model</button>' +
         '<button class="status-btn" id="fetchModelsBtn">Fetch Models</button>' +
         '<button class="status-btn" id="changeEndpointBtn">Change Endpoint</button>' +
@@ -1540,48 +1282,25 @@ function getWebviewContent(chatHistory, loading, config) {
         '<button id="debugBtn">🔍 Debug API Key</button>' +
         '</div>' +
         '<div id="chat">' +
-        (chatHtml || '<div class="empty-state">' +
-            'Start a conversation...<br><br>' +
+        (chatHtml || '<div class="empty-state">Start a conversation...<br><br>' +
             '🏛️ <b>Ask Sage Army</b>: api.genai.army.mil<br>' +
             '🔵 <b>GenAI.mil</b>: api.genai.mil<br><br>' +
             'Try: "Create a Python script called hello.py that prints Hello World"<br><br>' +
-            '<a href="https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html" ' +
-            'style="color:var(--vscode-textLink-foreground,#3794ff);">📖 API Documentation</a>' +
+            '<a href="https://docs.genai.army.mil/docs/api-documentation/api-endpoints.html" style="color:var(--vscode-textLink-foreground,#3794ff);">📖 API Documentation</a>' +
             '</div>') +
         '</div>' +
-        '<form id="form">' +
-        '<input id="input" type="text" placeholder="Ask me to write code, create files, or answer questions..." />' +
-        '<button type="submit">Send</button>' +
-        '</form></div>' +
-        '<script>' +
+        '<form id="form"><input id="input" type="text" placeholder="Ask me to write code, create files, or answer questions..." /><button type="submit">Send</button></form>' +
+        '</div><script>' +
         'var vscode=acquireVsCodeApi();' +
-        'document.getElementById("form").addEventListener("submit",function(e){' +
-        'e.preventDefault();var text=document.getElementById("input").value;' +
-        'if(text.trim()){vscode.postMessage({command:"send",text:text});document.getElementById("input").value="";}' +
-        '});' +
+        'document.getElementById("form").addEventListener("submit",function(e){e.preventDefault();var text=document.getElementById("input").value;if(text.trim()){vscode.postMessage({command:"send",text:text});document.getElementById("input").value="";}});' +
         'document.getElementById("saveChatBtn").addEventListener("click",function(){vscode.postMessage({command:"saveChat"});});' +
         'document.getElementById("clearChatBtn").addEventListener("click",function(){vscode.postMessage({command:"clearChat"});});' +
         'document.getElementById("debugBtn").addEventListener("click",function(){vscode.postMessage({command:"debugApiKey"});});' +
         'document.getElementById("changeModelBtn").addEventListener("click",function(){vscode.postMessage({command:"changeModel"});});' +
         'document.getElementById("fetchModelsBtn").addEventListener("click",function(){vscode.postMessage({command:"fetchModels"});});' +
         'document.getElementById("changeEndpointBtn").addEventListener("click",function(){vscode.postMessage({command:"changeEndpoint"});});' +
-        'document.getElementById("chat").addEventListener("click",function(e){' +
-        'var btn=e.target.closest(".code-btn");if(!btn)return;' +
-        'var codeBlock=btn.closest(".code-block");var codeEl=codeBlock.querySelector("code");' +
-        'var code=codeEl.textContent;var action=btn.getAttribute("data-action");var filename=btn.getAttribute("data-filename");' +
-        'if(action==="create"){vscode.postMessage({command:"createFile",filename:filename,content:code});}' +
-        'else if(action==="edit"){vscode.postMessage({command:"editFile",filename:filename,content:code});}' +
-        'else if(action==="insert"){vscode.postMessage({command:"insertAtCursor",content:code});}' +
-        '});' +
-        'window.addEventListener("message",function(event){' +
-        'var message=event.data;' +
-        'if(message.command==="stream"){' +
-        'var chatDiv=document.getElementById("chat");' +
-        'var lastMsg=chatDiv.querySelector(".message:last-child");' +
-        'if(lastMsg&&lastMsg.classList.contains("loading")){' +
-        'lastMsg.innerHTML="<b>🤖 GenAI:</b><br>"+message.text.replace(/\\n/g,"<br>");' +
-        'chatDiv.scrollTop=chatDiv.scrollHeight;}' +
-        '}});' +
+        'document.getElementById("chat").addEventListener("click",function(e){var btn=e.target.closest(".code-btn");if(!btn)return;var codeBlock=btn.closest(".code-block");var codeEl=codeBlock.querySelector("code");var code=codeEl.textContent;var action=btn.getAttribute("data-action");var filename=btn.getAttribute("data-filename");if(action==="create"){vscode.postMessage({command:"createFile",filename:filename,content:code});}else if(action==="edit"){vscode.postMessage({command:"editFile",filename:filename,content:code});}else if(action==="insert"){vscode.postMessage({command:"insertAtCursor",content:code});}});' +
+        'window.addEventListener("message",function(event){var message=event.data;if(message.command==="stream"){var chatDiv=document.getElementById("chat");var lastMsg=chatDiv.querySelector(".message:last-child");if(lastMsg&&lastMsg.classList.contains("loading")){lastMsg.innerHTML="<b>🤖 GenAI:</b><br>"+message.text.replace(/\\n/g,"<br>");chatDiv.scrollTop=chatDiv.scrollHeight;}}});' +
         'var chatDiv=document.getElementById("chat");chatDiv.scrollTop=chatDiv.scrollHeight;' +
         'setTimeout(function(){var inp=document.getElementById("input");if(inp){inp.focus();}},100);' +
         '</script></body></html>';
