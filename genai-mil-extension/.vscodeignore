@@ -1,4 +1,5 @@
 *.bak.js
+*.bak.json
 node_modules/**
 package-lock.json
 *.vsix

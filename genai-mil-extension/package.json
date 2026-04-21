@@ -2,7 +2,7 @@
   "name": "genai-mil-connector",
   "displayName": "GenAI.mil Connector",
   "description": "Connect to GenAI.mil, Ask Sage, and Ask Sage Army (api.genai.army.mil) APIs from VS Code with interactive chat and file editing",
-  "version": "9.2.0",
+  "version": "9.2.1",
   "engines": {
     "vscode": "^1.60.0"
   },
