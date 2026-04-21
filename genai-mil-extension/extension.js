@@ -77,7 +77,7 @@ const KNOWN_ENDPOINTS = {
 // The google-claude-* prefixed IDs are display names only.
 //
 
-Source: Pi extension KNOWN_ALIASES map (New5.txt)
+// Source: Pi extension KNOWN_ALIASES map (New5.txt)
 // ═══════════════════════════════════════════════════════════════
 const ASKSAGE_MODEL_IDS = {
     // Claude models - must use canonical date-suffixed IDs
