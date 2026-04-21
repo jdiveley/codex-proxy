@@ -378,12 +378,9 @@ function fetchAskSageModels(baseUrl, apiKey, pemPath) {
     });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// HELPER: Ask Sage Army API request  (POST /server/query)
-// FIX: translateModelId now receives endpoint for format-awareness.
-// FIX: Reads "message" field (not "response") for the AI reply.
-// FIX: Enhanced debug logging for model translation.
-// ═══════════════════════════════════════════════════════════════
+// askSageRequest — Ask Sage Army POST /server/query
+// FIX: Added soft-error detection for "model not available" 200 responses
+// FIX: Model IDs now pass through as-is when not in translation table
 function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onError, pemPath) {
     let url;
     try {
@@ -393,7 +390,7 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         return;
     }
 
-    // FIX: Pass endpoint so translateModelId knows this is asksage format
+    // Translate display model ID — falls back to modelId unchanged if not in table
     const apiModelId = translateModelId(model, endpoint);
 
     // Enhanced model translation debug logging
@@ -403,26 +400,20 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
     console.log('  Endpoint    : ' + endpoint);
     console.log('  Is AskSage  : ' + isAskSageFormat(endpoint));
 
-    // Build a flat message string from the messages array.
-    // Ask Sage Army /server/query takes a single "message" string,
-    // not a structured messages array like OpenAI.
+    // Build flat message string — Ask Sage Army takes a single string, not an array
     let fullMessage = '';
-
     const systemMsg = messages.find(function (m) { return m.role === 'system'; });
     if (systemMsg) {
         fullMessage += systemMsg.content + '\n\n';
     }
 
     const nonSystemMessages = messages.filter(function (m) { return m.role !== 'system'; });
-
     if (nonSystemMessages.length > 1) {
-        // Include conversation history for multi-turn context
         for (let i = 0; i < nonSystemMessages.length - 1; i++) {
             const m      = nonSystemMessages[i];
             const prefix = m.role === 'user' ? 'User: ' : 'Assistant: ';
             fullMessage += prefix + m.content + '\n\n';
         }
-        // Append the latest user message without a prefix label
         const lastMsg = nonSystemMessages[nonSystemMessages.length - 1];
         fullMessage += lastMsg.content;
     } else if (nonSystemMessages.length === 1) {
@@ -431,7 +422,7 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
 
     const payload = JSON.stringify({
         message:          fullMessage.trim(),
-        model:            apiModelId,   // Canonical/translated model ID
+        model:            apiModelId,
         limit_references: 0
     });
 
@@ -475,15 +466,15 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
         }
 
         let body = '';
-        res.on('data',  function (chunk) { body += chunk.toString(); });
-        res.on('end',   function () {
+        res.on('data', function (chunk) { body += chunk.toString(); });
+        res.on('end', function () {
             console.log('GenAI.mil: Raw response: ' + body);
             try {
                 const parsed = JSON.parse(body);
 
                 // Ask Sage Army response shape:
-                // { "message": "<AI reply text>", "response": "OK", "status": 200 }
-                // "message" = the actual AI answer
+                // { "message": "<AI reply>", "response": "OK", "status": 200 }
+                // "message" = actual AI text
                 // "response" = always the string "OK" — NOT the answer
                 const responseText =
                     parsed.message  ||
@@ -491,11 +482,10 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
                     parsed.text     ||
                     parsed.answer   ||
                     parsed.output   ||
-                    // Only use "response" if it is not the literal string "OK"
                     (parsed.response && parsed.response !== 'OK' ? parsed.response : null) ||
                     JSON.stringify(parsed);
 
-                // Surface API-level errors reported in the status field
+                // Surface explicit API status errors
                 if (parsed.status && parsed.status !== 200) {
                     onError(new Error(
                         'Ask Sage error (status ' + parsed.status + '): ' + responseText
@@ -503,7 +493,37 @@ function askSageRequest(endpoint, apiKey, model, messages, onData, onDone, onErr
                     return;
                 }
 
-                // Strip any leading newlines from the response text
+                // FIX: Detect soft errors — the API returns status 200 even
+                //      when the model is invalid, putting the error in "message".
+                //      We must catch these before treating them as valid responses.
+                const SOFT_ERROR_PATTERNS = [
+                    'sorry, this model is no longer available',
+                    'model is no longer available',
+                    'please use a more recent version',
+                    'model not found',
+                    'invalid model',
+                    'model does not exist',
+                    'no such model',
+                    'unknown model'
+                ];
+
+                const lowerResponse = (responseText || '').toLowerCase();
+                const isSoftError   = SOFT_ERROR_PATTERNS.some(function (pattern) {
+                    return lowerResponse.indexOf(pattern) !== -1;
+                });
+
+                if (isSoftError) {
+                    // Surface this as a proper error with actionable guidance
+                    onError(new Error(
+                        '⚠️ Model "' + apiModelId + '" is not available on Ask Sage Army.\n' +
+                        'Click "Fetch Models" in the chat panel to see available models,\n' +
+                        'or use "Change Model" to select a different one.\n\n' +
+                        'API said: ' + responseText
+                    ));
+                    return;
+                }
+
+                // Strip leading newlines
                 const cleanedText = responseText.replace(/^\n+/, '');
 
                 if (!cleanedText || cleanedText.trim() === '') {
